@@ -101,3 +101,45 @@ async def test_github_client_handles_no_token(monkeypatch: pytest.MonkeyPatch) -
     assert prs == []
     # Ensure Authorization header not present
     assert all("Authorization" not in h for h in fake_client.seen_headers)
+
+
+@pytest.mark.asyncio
+async def test_github_client_handles_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test that GitHub client properly handles HTTP errors."""
+    import httpx
+
+    class FakeAsyncClientError:
+        async def __aenter__(self) -> FakeAsyncClientError:
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def get(
+            self,
+            url: str,
+            headers: dict[str, str] | None = None,
+            params: dict[str, Any] | None = None,
+        ):
+            # Raise an HTTPStatusError to simulate API error
+            raise httpx.HTTPStatusError("Not Found", request=None, response=None)
+
+    # Patch httpx.AsyncClient to our fake error client
+    monkeypatch.setattr(gh.httpx, "AsyncClient", lambda timeout: FakeAsyncClientError())
+
+    client = gh.GitHubClient(token="tok")
+
+    # Should raise the HTTPStatusError
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.list_open_prs("o", "r")
+
+
+def test_fake_async_client_raises_error_when_no_responses():
+    """Test that FakeAsyncClient raises AssertionError when no more responses are queued."""
+    fake_client = FakeAsyncClient([])
+
+    import asyncio
+
+    # Should raise AssertionError when trying to get a response
+    with pytest.raises(AssertionError, match="No more fake responses queued"):
+        asyncio.run(fake_client.get("http://example.com"))

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 # Time conversion constants
 SECONDS_PER_MINUTE = 60
-SECONDS_PER_HOUR = 3600
-SECONDS_PER_DAY = 86400
+MINUTE_PER_HOUR = 60
+HOUR_PER_DAY = 24
+SECONDS_PER_HOUR = SECONDS_PER_MINUTE * MINUTE_PER_HOUR
+SECONDS_PER_DAY = SECONDS_PER_HOUR * HOUR_PER_DAY
 
 
 def format_time_ago(seconds: int) -> str:

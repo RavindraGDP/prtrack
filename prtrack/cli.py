@@ -4,6 +4,7 @@ import subprocess
 import sys
 from typing import NoReturn
 
+from . import __version__
 from .tui import PRTrackApp
 
 
@@ -20,6 +21,9 @@ def main() -> None:
         command = sys.argv[1]
         if command == "update":
             update_tool()
+            return
+        elif command in ("--version", "-v"):
+            print(f"prtrack {__version__}")
             return
 
     # Default behavior: launch the TUI

@@ -102,11 +102,13 @@ class PRTrackApp(App):
         self._overlay_container: Vertical | None = None
         self._overlay_list: ListView | None = None
         self._overlay_select_action: Callable[[str], None] | None = None
+        # Navigation stack to track previous screens
+        self._navigation_stack: list[str] = []
         # Markdown selection state
         self._md_mode: bool = False
         self._md_selected: dict[tuple[str, int], PullRequest] = {}
         self._md_scope: tuple[str, str | None] | None = None  # (kind, value)
-        self._settings_page_index: int = int(getattr(self.cfg, "settings_page_index", 0) or 0)
+        self._settings_page_index: int = 0
         # Key mapping (defaults in code, optional overrides from cfg)
         self._keymap_defaults: dict[str, str] = {
             "next_page": "]",
@@ -151,27 +153,12 @@ class PRTrackApp(App):
 
     def action_go_back(self) -> None:
         """Context back: close overlays or return to previous selection menu."""
-        # Always clear prompts first
         self._remove_all_prompts()
-        # Close overlay if open
-        if self._overlay_container is not None:
-            with contextlib.suppress(Exception):
-                self._overlay_container.remove()
-            self._overlay_container = None
-            self._overlay_list = None
-            self._overlay_select_action = None
-            # If we were in a config/menu overlay, go home
-            # Also exit markdown mode when leaving overlays back to home
-            self._md_mode = False
-            self._md_scope = None
-            self._show_menu()
+        if self._close_overlay_if_open():
             return
-        # If in markdown selection table, return to markdown menu
-        if self._md_mode and self._table.display:
-            self._show_markdown_menu()
+        if self._handle_markdown_back_if_needed():
             return
-        # Otherwise go home
-        self._show_menu()
+        self._navigate_back_or_home()
 
     def action_accept_markdown_selection(self) -> None:
         """In markdown selection mode, return to the markdown menu."""
@@ -187,6 +174,8 @@ class PRTrackApp(App):
         self._table.display = False
         self._status.display = False
         self._menu.focus()
+        # Clear navigation stack when going back to main menu
+        self._navigation_stack.clear()
 
     def action_refresh_current(self) -> None:
         """Refresh the data for the current view.
@@ -554,73 +543,15 @@ class PRTrackApp(App):
         # Use Textual's built-in notification system
         self.notify(message, title="PR Tracker", timeout=3)
 
-    def on_list_view_selected(self, event: ListView.Selected) -> None:  # noqa: PLR0912
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Handle item selection from either the main menu or overlays.
 
         Args:
             event: The selection event emitted by `ListView`.
         """
-        # If an overlay list is active and this event is for it, handle overlay selection
-        if self._overlay_list is not None and event.list_view is self._overlay_list:
-            item_id = getattr(event.item, "_value", event.item.id or "")
-            if self._overlay_container:
-                self._overlay_container.remove()
-            cb = self._overlay_select_action
-            # Clear overlay context
-            self._overlay_container = None
-            self._overlay_list = None
-            self._overlay_select_action = None
-            if cb:
-                cb(item_id)
-            else:
-                self._show_menu()
+        if self._handle_overlay_selection_if_any(event):
             return
-
-        # Main menu selection via Enter
-        if self._menu is not None and event.list_view is self._menu:
-            item_id = event.item.id or ""
-            match item_id:
-                case "list_all_prs":
-                    self._show_cached_all()
-                case "list_repos":
-                    self._show_list(
-                        "Tracked Repos",
-                        [r.name for r in self.cfg.repositories],
-                        select_action=self._select_repo,
-                    )
-                case "list_accounts":
-                    accounts = sorted(
-                        set(self.cfg.global_users)
-                        | {u for r in self.cfg.repositories for u in (r.users or [])}
-                    )
-                    self._show_list(
-                        "Tracked Accounts",
-                        accounts,
-                        select_action=self._select_account,
-                    )
-                case "prs_per_repo":
-                    self._show_list(
-                        "Repos",
-                        [r.name for r in self.cfg.repositories],
-                        select_action=self._load_repo_prs,
-                    )
-                case "prs_per_account":
-                    accounts = sorted(
-                        set(self.cfg.global_users)
-                        | {u for r in self.cfg.repositories for u in (r.users or [])}
-                    )
-                    self._show_list(
-                        "Accounts",
-                        accounts,
-                        select_action=self._load_account_prs,
-                    )
-                case "save_markdown":
-                    self._show_markdown_menu()
-                case "config":
-                    self._show_config_menu(is_from_main_menu=True)
-                case "exit":
-                    self.exit()
-            return
+        self._handle_main_menu_selection_if_any(event)
 
     # ---------- Pagination actions and wrap workaround ----------
 
@@ -650,85 +581,14 @@ class PRTrackApp(App):
         scope = self._current_scope_key()
         self._update_status_label(scope, refreshing=False)
 
-    def on_key(self, event) -> None:  # type: ignore[override]  # noqa: PLR0911, PLR0912, PLR0915
+    def on_key(self, event) -> None:  # type: ignore[override]
         """Key handling: wrapping for lists and custom key mappings."""
         key = getattr(event, "key", None)
         if key is None:
             return
-        # Custom key mapping (in addition to Textual bindings)
-        try:
-            table_active = (
-                self._table.display
-                and self._overlay_container is None
-                and not self._menu.display
-                and self._table_has_focus()
-            )
-            # Mark in markdown mode via custom key (e.g., allow "enter" to mark)
-            if self._md_mode and table_active and key == self._keymap.get("mark_markdown"):
-                self.action_toggle_markdown_pr()
-                with contextlib.suppress(Exception):
-                    event.prevent_default()
-                event.stop()
-                return
-            # Open PR link via custom key when not in markdown mode
-            if (not self._md_mode) and table_active and key == self._keymap.get("open_pr"):
-                pr = self._table.get_selected_pr()
-                if pr:
-                    webbrowser.open(pr.html_url)
-                    with contextlib.suppress(Exception):
-                        event.prevent_default()
-                    event.stop()
-                    return
-            # Pagination keys
-            if key == self._keymap.get("next_page"):
-                self.action_next_page()
-                with contextlib.suppress(Exception):
-                    event.prevent_default()
-                event.stop()
-                return
-            if key == self._keymap.get("prev_page"):
-                self.action_prev_page()
-                with contextlib.suppress(Exception):
-                    event.prevent_default()
-                event.stop()
-                return
-            # Back key
-            if key == self._keymap.get("back"):
-                self.action_go_back()
-                with contextlib.suppress(Exception):
-                    event.prevent_default()
-                event.stop()
-                return
-        except Exception:
-            pass
-        # Workaround for ListView wrap: manually wrap selection on up/down keys
-        if key not in {"up", "down"}:
+        if self._handle_custom_keymap(key, event):
             return
-        target = None
-        if self._overlay_list is not None and self._overlay_list.display:
-            target = self._overlay_list
-        elif self._menu is not None and self._menu.display:
-            target = self._menu
-        if target is None:
-            return
-        try:
-            count = len(target.children)
-            if count == 0:
-                return
-            idx = getattr(target, "index", 0)
-            wrapped = self._maybe_wrap_index(count, idx, key)
-            if wrapped is None:
-                # Not at a boundary; let Textual handle normal movement
-                return
-            target.index = wrapped
-            # Prevent default ListView key handling from running as well,
-            # which would otherwise move the selection one more step.
-            with contextlib.suppress(Exception):
-                event.prevent_default()
-            event.stop()
-        except Exception:
-            pass
-        return
+        self._handle_list_wrap_key(key, event)
 
     @staticmethod
     def _maybe_wrap_index(count: int, idx: int, key: str) -> int | None:
@@ -856,12 +716,13 @@ class PRTrackApp(App):
 
     def _show_config_menu(self, is_from_main_menu: bool = False) -> None:
         """Display Settings menu as an overlay list."""
-        # Reset pagination when entering Settings from main menu
-        if self._overlay_container is None:
-            if is_from_main_menu:
-                self._settings_page_index = 0
-            else:
-                self._settings_page_index = int(getattr(self.cfg, "settings_page_index", 0) or 0)
+        # Push to navigation stack if coming from main menu
+        if is_from_main_menu:
+            # Clear the navigation stack when coming from main menu to avoid accumulation
+            self._navigation_stack.clear()
+            self._navigation_stack.append("main_menu")
+            self._settings_page_index = 0
+
         actions = [
             ("add_repo", "Add repo"),
             ("remove_repo", "Remove repo"),
@@ -953,12 +814,16 @@ class PRTrackApp(App):
     def _handle_markdown_action(self, action: str) -> None:
         match action:
             case "md_by_repo":
+                # Push current screen to navigation stack before showing repo list
+                self._navigation_stack.append("markdown_menu")
                 self._show_list(
                     "Repos",
                     [r.name for r in self.cfg.repositories],
                     select_action=self._md_select_repo,
                 )
             case "md_by_account":
+                # Push current screen to navigation stack before showing account list
+                self._navigation_stack.append("markdown_menu")
                 accounts = sorted(
                     set(self.cfg.global_users)
                     | {u for r in self.cfg.repositories for u in (r.users or [])}
@@ -972,6 +837,8 @@ class PRTrackApp(App):
                 self._md_review_selection()
             case "md_save":
                 self._prompt_save_markdown()
+            case "back":
+                self.action_go_back()
             case _:
                 self._show_menu()
 
@@ -995,10 +862,14 @@ class PRTrackApp(App):
         self._update_markdown_status()
 
     def _md_select_repo(self, repo_name: str) -> None:
+        # Push the repo selection screen to navigation stack so backspace works correctly
+        self._navigation_stack.append("repo_selection")
         self._show_cached_repo(repo_name)
         self._enter_md_mode("repo", repo_name)
 
     def _md_select_account(self, account: str) -> None:
+        # Push the account selection screen to navigation stack so backspace works correctly
+        self._navigation_stack.append("account_selection")
         self._show_cached_account(account)
         self._enter_md_mode("account", account)
 
@@ -1072,49 +943,43 @@ class PRTrackApp(App):
         # Exit md mode back to menu but keep selection for convenience
         self._md_mode = False
         self._md_scope = None
-        self._show_menu()
+        # Check if we should return to markdown menu
+        if self._navigation_stack and self._navigation_stack[-1] == "markdown_menu":
+            # Remove the markdown_menu entry from stack and show markdown menu
+            self._navigation_stack.pop()
+            self._show_markdown_menu()
+        else:
+            self._show_menu()
 
-    def _handle_config_action(self, action: str) -> None:  # noqa: PLR0912
+    def _handle_config_action(self, action: str) -> None:
         """Route a selected config action to its handler.
 
         Args:
             action: Action key from the config menu.
         """
-        match action:
-            case "add_repo":
-                self._prompt_add_repo()
-            case "remove_repo":
-                self._prompt_remove_repo()
-            case "add_account":
-                self._prompt_add_account()
-            case "remove_account":
-                self._prompt_remove_account_select()
-            case "set_stale":
-                self._prompt_set_staleness_threshold()
-            case "set_page_size":
-                self._prompt_set_pr_page_size()
-            case "set_settings_page_size":
-                self._prompt_set_settings_menu_page_size()
-            case "update_token":
-                self._prompt_update_token()
-            case "keymap_menu":
-                self._show_keymap_menu()
-            case "show_keymap":
-                self._show_current_keymap()
-            case "show_config":
-                self._show_current_config()
-            case "settings_next":
-                self._settings_page_index += 1
-                self.cfg.settings_page_index = self._settings_page_index
-                save_config(self.cfg)
-                self._show_config_menu()
-            case "settings_prev":
-                self._settings_page_index = max(0, self._settings_page_index - 1)
-                self.cfg.settings_page_index = self._settings_page_index
-                save_config(self.cfg)
-                self._show_config_menu()
-            case _:
-                self._show_menu()
+        handlers: dict[str, Callable[[], None]] = {
+            "add_repo": self._prompt_add_repo,
+            "remove_repo": self._prompt_remove_repo,
+            "add_account": self._prompt_add_account,
+            "remove_account": self._prompt_remove_account_select,
+            "set_stale": self._prompt_set_staleness_threshold,
+            "set_page_size": self._prompt_set_pr_page_size,
+            "set_settings_page_size": self._prompt_set_settings_menu_page_size,
+            "update_token": self._prompt_update_token,
+            "keymap_menu": self._show_keymap_menu,
+            "show_keymap": self._show_current_keymap,
+            "show_config": self._show_current_config,
+            "settings_next": lambda: (
+                setattr(self, "_settings_page_index", self._settings_page_index + 1),
+                self._show_config_menu(),
+            ),
+            "settings_prev": lambda: (
+                setattr(self, "_settings_page_index", max(0, self._settings_page_index - 1)),
+                self._show_config_menu(),
+            ),
+            "back": self.action_go_back,
+        }
+        handlers.get(action, self._show_menu)()
 
     def action_show_keymap_overlay(self) -> None:
         """Show an overlay with current key bindings; selecting any item closes it."""
@@ -1141,6 +1006,9 @@ class PRTrackApp(App):
 
         def close_and_back():
             static.remove()
+            # Only add to navigation stack if it's not already there
+            if not self._navigation_stack or self._navigation_stack[-1] != "config_menu":
+                self._navigation_stack.append("config_menu")
             self._show_config_menu()
 
         self.set_timer(2.0, close_and_back)
@@ -1151,7 +1019,7 @@ class PRTrackApp(App):
             ("prev_page", f"prev_page → '{self._keymap.get('prev_page', '')}'"),
             ("open_pr", f"open_pr → '{self._keymap.get('open_pr', '')}'"),
             ("mark_markdown", f"mark_markdown → '{self._keymap.get('mark_markdown', '')}'"),
-            ("back", f"back → '{self._keymap.get('back', '')}'"),
+            ("back_key", f"back → '{self._keymap.get('back', '')}'"),
             ("reset_all", "Reset all to defaults"),
             ("back", "Back"),
         ]
@@ -1173,7 +1041,14 @@ class PRTrackApp(App):
                 lambda v, a=action: self._do_set_keymap(a, v),
             )
             return
-        self._show_config_menu()
+        # Only add to navigation stack if it's not already there
+        if action == "back":
+            self.action_go_back()
+        else:
+            # Only add to navigation stack if it's not already there
+            if not self._navigation_stack or self._navigation_stack[-1] != "config_menu":
+                self._navigation_stack.append("config_menu")
+            self._show_config_menu()
 
     def _do_set_keymap(self, action: str, value: str) -> None:
         key = value.strip().lower()
@@ -1198,6 +1073,8 @@ class PRTrackApp(App):
 
     def _prompt_add_repo(self) -> None:
         """Prompt the user to add a repository and optional users."""
+        # Push current screen to navigation stack
+        self._navigation_stack.append("config_menu")
         self._prompt_two_fields(
             "Add Repo", "owner/repo", "optional users (comma)", self._do_add_repo
         )
@@ -1214,10 +1091,20 @@ class PRTrackApp(App):
         if repo:
             self.cfg.repositories.append(RepoConfig(name=repo, users=users or None))
             save_config(self.cfg)
-        self._show_menu()
+        # Go back to the previous screen using navigation stack
+        if self._navigation_stack:
+            prev_screen = self._navigation_stack.pop()
+            if prev_screen == "config_menu":
+                self._show_config_menu()
+            else:
+                self._show_menu()
+        else:
+            self._show_menu()
 
     def _prompt_remove_repo(self) -> None:
         """Prompt for selecting a repository to remove from the config."""
+        # Push current screen to navigation stack
+        self._navigation_stack.append("config_menu")
         names = [r.name for r in self.cfg.repositories]
         self._show_list("Remove Repo - select", names, select_action=self._do_remove_repo)
 
@@ -1232,10 +1119,20 @@ class PRTrackApp(App):
         with contextlib.suppress(Exception):
             storage.delete_prs_by_repo(repo_name)
         save_config(self.cfg)
-        self._show_menu()
+        # Go back to the previous screen using navigation stack
+        if self._navigation_stack:
+            prev_screen = self._navigation_stack.pop()
+            if prev_screen == "config_menu":
+                self._show_config_menu()
+            else:
+                self._show_menu()
+        else:
+            self._show_menu()
 
     def _prompt_add_account(self) -> None:
         """Prompt to add an account globally or scoped to a repository."""
+        # Push current screen to navigation stack
+        self._navigation_stack.append("config_menu")
         self._prompt_two_fields(
             "Add Account", "username", "repo (owner/repo or empty=global)", self._do_add_account
         )
@@ -1250,7 +1147,7 @@ class PRTrackApp(App):
         username = username.strip()
         repo_name = repo_name.strip()
         if not username:
-            self._show_menu()
+            self._navigate_back_or_home()
             return
         if repo_name:
             for r in self.cfg.repositories:
@@ -1264,10 +1161,12 @@ class PRTrackApp(App):
             users.add(username)
             self.cfg.global_users = sorted(users)
         save_config(self.cfg)
-        self._show_menu()
+        self._navigate_back_or_home()
 
     def _prompt_remove_account_select(self) -> None:
         """Show a list of accounts (global and per-repo) to remove via selection."""
+        # Push current screen to navigation stack
+        self._navigation_stack.append("config_menu")
         items: list[str] = []
         # Global users
         for u in sorted(set(self.cfg.global_users)):
@@ -1295,7 +1194,7 @@ class PRTrackApp(App):
         try:
             prefix, username = key.split(":", 1)
         except ValueError:
-            self._show_menu()
+            self._navigate_back_or_home()
             return
         username = username.strip()
         if prefix == "global":
@@ -1310,10 +1209,12 @@ class PRTrackApp(App):
             with contextlib.suppress(Exception):
                 storage.delete_prs_by_account(username, repo_name)
         save_config(self.cfg)
-        self._show_menu()
+        self._navigate_back_or_home()
 
     def _prompt_update_token(self) -> None:
         """Prompt to update the stored GitHub personal access token."""
+        # Push current screen to navigation stack
+        self._navigation_stack.append("config_menu")
         self._prompt_one_field("Update GitHub Token", "token", self._do_update_token)
 
     def _do_update_token(self, token: str) -> None:
@@ -1326,7 +1227,21 @@ class PRTrackApp(App):
         save_config(self.cfg)
         # refresh client headers
         self.client = GitHubClient(self.cfg.auth_token)
-        self._show_menu()
+        # Go back to the previous screen using navigation stack
+        if self._navigation_stack:
+            prev_screen = self._navigation_stack.pop()
+            if prev_screen == "config_menu":
+                self._show_config_menu()
+            elif self._navigation_stack:
+                prev_screen = self._navigation_stack.pop()
+                if prev_screen == "config_menu":
+                    self._show_config_menu()
+                else:
+                    self._show_menu()
+            else:
+                self._show_menu()
+        else:
+            self._show_menu()
 
     def _show_current_config(self) -> None:
         """Display a transient view of the current configuration."""
@@ -1344,7 +1259,15 @@ class PRTrackApp(App):
 
         def close_and_back():
             static.remove()
-            self._show_menu()
+            # Go back to the previous screen using navigation stack
+            if self._navigation_stack:
+                prev_screen = self._navigation_stack.pop()
+                if prev_screen == "config_menu":
+                    self._show_config_menu()
+                else:
+                    self._show_menu()
+            else:
+                self._show_menu()
 
         self.set_timer(2.0, close_and_back)
 
@@ -1369,6 +1292,8 @@ class PRTrackApp(App):
 
     def _prompt_set_staleness_threshold(self) -> None:
         """Prompt for staleness threshold in seconds."""
+        # Push current screen to navigation stack
+        self._navigation_stack.append("config_menu")
         self._prompt_one_field(
             "Set staleness threshold (seconds)",
             str(self.cfg.staleness_threshold_seconds),
@@ -1381,10 +1306,20 @@ class PRTrackApp(App):
             self.cfg.staleness_threshold_seconds = seconds
             self._stale_after_seconds = seconds
             save_config(self.cfg)
-        self._show_menu()
+        # Go back to the previous screen using navigation stack
+        if self._navigation_stack:
+            prev_screen = self._navigation_stack.pop()
+            if prev_screen == "config_menu":
+                self._show_config_menu()
+            else:
+                self._show_menu()
+        else:
+            self._show_menu()
 
     def _prompt_set_pr_page_size(self) -> None:
         """Prompt for PRs per page size."""
+        # Push current screen to navigation stack
+        self._navigation_stack.append("config_menu")
         self._prompt_one_field(
             "Set PRs per page",
             str(getattr(self.cfg, "pr_page_size", 10)),
@@ -1403,6 +1338,8 @@ class PRTrackApp(App):
 
     def _prompt_set_settings_menu_page_size(self) -> None:
         """Prompt for Settings menu page size."""
+        # Push current screen to navigation stack
+        self._navigation_stack.append("config_menu")
         self._prompt_one_field(
             "Set Settings menu page size",
             str(getattr(self.cfg, "menu_page_size", 5)),
@@ -1419,6 +1356,9 @@ class PRTrackApp(App):
             self._settings_page_index = 0
         except Exception:
             self._show_toast("Invalid number (> 0)")
+        # Only add to navigation stack if it's not already there
+        if not self._navigation_stack or self._navigation_stack[-1] != "config_menu":
+            self._navigation_stack.append("config_menu")
         self._show_config_menu()
 
     def _prompt_two_fields(self, title: str, ph1: str, ph2: str, cb) -> None:
@@ -1460,9 +1400,7 @@ class PRTrackApp(App):
         Args:
             event: Button press event emitted by Textual.
         """
-        # Handle OK/Cancel for prompt containers
         label = event.button.label or ""
-        # Find the nearest ancestor Vertical used for prompts
         container = event.button.parent and event.button.parent.parent  # Horizontal -> Vertical
         if not container:
             return
@@ -1472,17 +1410,244 @@ class PRTrackApp(App):
         if not cb:
             return
         if container.id == "prompt_one":  # type: ignore[union-attr]
-            value = container.query_one(Input).value  # type: ignore[arg-type]
-            container.remove()
-            if label == "OK":
-                cb(value)
+            self._handle_prompt_one(container, label, cb)
+            return
+        if container.id == "prompt_two":  # type: ignore[union-attr]
+            self._handle_prompt_two(container, label, cb)
+            return
+
+    # ---------------- Small helpers extracted to reduce branching ----------------
+
+    def _close_overlay_if_open(self) -> bool:
+        """Close overlay if present and navigate back.
+
+        Returns:
+            True if an overlay was closed and navigation occurred; False otherwise.
+        """
+        if self._overlay_container is None:
+            return False
+        with contextlib.suppress(Exception):
+            self._overlay_container.remove()
+        self._overlay_container = None
+        self._overlay_list = None
+        self._overlay_select_action = None
+        self._md_mode = False
+        self._md_scope = None
+        self._navigate_back_or_home()
+        return True
+
+    def _handle_markdown_back_if_needed(self) -> bool:
+        """Handle back navigation when in markdown selection context.
+
+        Returns:
+            True if markdown-specific back handling occurred; False otherwise.
+        """
+        if not (self._md_mode and self._table.display):
+            return False
+        if self._navigation_stack and self._navigation_stack[-1] == "repo_selection":
+            self._navigation_stack.pop()
+            self._show_list(
+                "Repos",
+                [r.name for r in self.cfg.repositories],
+                select_action=self._md_select_repo,
+            )
+            return True
+        if self._navigation_stack and self._navigation_stack[-1] == "account_selection":
+            self._navigation_stack.pop()
+            accounts = sorted(
+                set(self.cfg.global_users)
+                | {u for r in self.cfg.repositories for u in (r.users or [])}
+            )
+            self._show_list("Accounts", accounts, select_action=self._md_select_account)
+            return True
+        self._show_markdown_menu()
+        return True
+
+    def _navigate_back_or_home(self) -> None:
+        """Navigate back using the stack or go home when stack is empty."""
+        if self._navigation_stack:
+            prev_screen = self._navigation_stack.pop()
+            if prev_screen == "config_menu":
+                self._show_config_menu()
+            elif prev_screen == "main_menu":
+                self._show_menu()
+            elif prev_screen == "markdown_menu":
+                self._show_markdown_menu()
             else:
                 self._show_menu()
-        elif container.id == "prompt_two":  # type: ignore[union-attr]
-            v1 = container.query_one("#f1", Input).value  # type: ignore[arg-type]
-            v2 = container.query_one("#f2", Input).value  # type: ignore[arg-type]
-            container.remove()
-            if label == "OK":
-                cb(v1, v2)
-            else:
-                self._show_menu()
+        else:
+            self._show_menu()
+
+    def _handle_overlay_selection_if_any(self, event: ListView.Selected) -> bool:
+        """Handle overlay list selection if the event targets an overlay list.
+
+        Args:
+            event: The `ListView.Selected` event.
+
+        Returns:
+            True if handled; False otherwise.
+        """
+        if self._overlay_list is None or event.list_view is not self._overlay_list:
+            return False
+        item_id = getattr(event.item, "_value", event.item.id or "")
+        if self._overlay_container:
+            self._overlay_container.remove()
+        cb = self._overlay_select_action
+        self._overlay_container = None
+        self._overlay_list = None
+        self._overlay_select_action = None
+        if cb:
+            cb(item_id)
+        else:
+            self._show_menu()
+        return True
+
+    def _handle_main_menu_selection_if_any(self, event: ListView.Selected) -> None:
+        """Handle selection on the main menu list if present."""
+        if self._menu is None or event.list_view is not self._menu:
+            return
+        item_id = event.item.id or ""
+        actions: dict[str, Callable[[], None]] = {
+            "list_all_prs": self._show_cached_all,
+            "list_repos": lambda: self._show_list(
+                "Tracked Repos", [r.name for r in self.cfg.repositories], self._select_repo
+            ),
+            "list_accounts": lambda: self._show_list(
+                "Tracked Accounts",
+                sorted(
+                    set(self.cfg.global_users)
+                    | {u for r in self.cfg.repositories for u in (r.users or [])}
+                ),
+                self._select_account,
+            ),
+            "prs_per_repo": lambda: self._show_list(
+                "Repos", [r.name for r in self.cfg.repositories], self._load_repo_prs
+            ),
+            "prs_per_account": lambda: self._show_list(
+                "Accounts",
+                sorted(
+                    set(self.cfg.global_users)
+                    | {u for r in self.cfg.repositories for u in (r.users or [])}
+                ),
+                self._load_account_prs,
+            ),
+            "save_markdown": self._show_markdown_menu,
+            "config": lambda: self._show_config_menu(is_from_main_menu=True),
+            "exit": self.exit,
+        }
+        actions.get(item_id, self._show_menu)()
+
+    def _handle_custom_keymap(self, key: str, event) -> bool:
+        """Handle custom key mappings for the table and pagination.
+
+        Args:
+            key: The key string from the event.
+            event: The original Textual event (used to prevent default and stop).
+
+        Returns:
+            True if the event was handled; False to continue processing.
+        """
+        try:
+            table_active = (
+                self._table.display
+                and self._overlay_container is None
+                and not self._menu.display
+                and self._table_has_focus()
+            )
+            if self._md_mode and table_active and key == self._keymap.get("mark_markdown"):
+                self.action_toggle_markdown_pr()
+                with contextlib.suppress(Exception):
+                    event.prevent_default()
+                event.stop()
+                return True
+            if (not self._md_mode) and table_active and key == self._keymap.get("open_pr"):
+                pr = self._table.get_selected_pr()
+                if pr:
+                    webbrowser.open(pr.html_url)
+                    with contextlib.suppress(Exception):
+                        event.prevent_default()
+                    event.stop()
+                    return True
+            if key == self._keymap.get("next_page"):
+                self.action_next_page()
+                with contextlib.suppress(Exception):
+                    event.prevent_default()
+                event.stop()
+                return True
+            if key == self._keymap.get("prev_page"):
+                self.action_prev_page()
+                with contextlib.suppress(Exception):
+                    event.prevent_default()
+                event.stop()
+                return True
+            if key == self._keymap.get("back"):
+                self.action_go_back()
+                with contextlib.suppress(Exception):
+                    event.prevent_default()
+                event.stop()
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _handle_list_wrap_key(self, key: str, event) -> None:
+        """Wrap ListView selection for up/down keys at boundaries.
+
+        Args:
+            key: Key value from event.
+            event: The original Textual event.
+        """
+        if key not in {"up", "down"}:
+            return
+        target = None
+        if self._overlay_list is not None and self._overlay_list.display:
+            target = self._overlay_list
+        elif self._menu is not None and self._menu.display:
+            target = self._menu
+        if target is None:
+            return
+        try:
+            count = len(target.children)
+            if count == 0:
+                return
+            idx = getattr(target, "index", 0)
+            wrapped = self._maybe_wrap_index(count, idx, key)
+            if wrapped is None:
+                return
+            target.index = wrapped
+            with contextlib.suppress(Exception):
+                event.prevent_default()
+            event.stop()
+        except Exception:
+            pass
+
+    def _handle_prompt_one(self, container, label: str, cb: Callable[[str], None]) -> None:
+        """Process a one-field prompt OK/Cancel action.
+
+        Args:
+            container: The prompt container Vertical node.
+            label: Button label (OK/Cancel).
+            cb: Callback to invoke with the entered value.
+        """
+        value = container.query_one(Input).value  # type: ignore[arg-type]
+        container.remove()
+        if label == "OK":
+            cb(value)
+        else:
+            self._navigate_back_or_home()
+
+    def _handle_prompt_two(self, container, label: str, cb: Callable[[str, str], None]) -> None:
+        """Process a two-field prompt OK/Cancel action.
+
+        Args:
+            container: The prompt container Vertical node.
+            label: Button label (OK/Cancel).
+            cb: Callback to invoke with the two entered values.
+        """
+        v1 = container.query_one("#f1", Input).value  # type: ignore[arg-type]
+        v2 = container.query_one("#f2", Input).value  # type: ignore[arg-type]
+        container.remove()
+        if label == "OK":
+            cb(v1, v2)
+        else:
+            self._navigate_back_or_home()

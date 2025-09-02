@@ -24,7 +24,6 @@ class AppConfig:
     staleness_threshold_seconds: int = 300  # 5 minutes default
     pr_page_size: int = 10  # PRs per page for pagination
     menu_page_size: int = 5  # Settings menu items per page
-    settings_page_index: int = 0  # Last-used Settings menu page index
     # Optional key mappings; defaults live in code and are merged at runtime
     keymap: dict[str, str] = field(default_factory=dict)
 
@@ -49,7 +48,6 @@ class AppConfig:
             staleness_threshold_seconds=data.get("staleness_threshold_seconds", 300),
             pr_page_size=int(data.get("pr_page_size", 10)),
             menu_page_size=int(data.get("menu_page_size", 5)),
-            settings_page_index=int(data.get("settings_page_index", 0)),
             keymap=dict(data.get("keymap", {}) or {}),
         )
 
@@ -69,7 +67,6 @@ class AppConfig:
             "staleness_threshold_seconds": self.staleness_threshold_seconds,
             "pr_page_size": int(self.pr_page_size),
             "menu_page_size": int(self.menu_page_size),
-            "settings_page_index": int(self.settings_page_index),
             # Only store overrides; defaults are in code
             **({"keymap": self.keymap} if self.keymap else {}),
         }
