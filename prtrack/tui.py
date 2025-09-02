@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import time
 import webbrowser
 from collections.abc import Callable
@@ -27,6 +28,7 @@ from . import storage
 from .config import AppConfig, RepoConfig, load_config, save_config
 from .github import GITHUB_API, GitHubClient, PullRequest, filter_prs
 from .ui import PRTable
+from .utils.markdown import write_prs_markdown
 from .utils.time import format_time_ago
 
 
@@ -44,7 +46,8 @@ MAIN_MENU: list[MenuItem] = [
     MenuItem("list_accounts", "List tracked accounts"),
     MenuItem("prs_per_repo", "List PRs per repo"),
     MenuItem("prs_per_account", "List PRs per account"),
-    MenuItem("config", "Adjust config"),
+    MenuItem("save_markdown", "Save PRs to Markdown"),
+    MenuItem("config", "Settings"),
     MenuItem("exit", "Exit"),
 ]
 
@@ -59,9 +62,13 @@ class PRTrackApp(App):
     BINDINGS: ClassVar[list[Binding]] = [
         Binding("q", "quit", "Quit"),
         Binding("escape", "go_home", "Home"),
+        Binding("backspace", "go_back", "Back"),
         Binding("r", "refresh_current", "Refresh"),
         Binding("]", "next_page", "Next Page"),
         Binding("[", "prev_page", "Prev Page"),
+        Binding("m", "toggle_markdown_pr", "Mark for MD"),
+        Binding("enter", "accept_markdown_selection", "Accept (MD)"),
+        Binding("?", "show_keymap_overlay", "Help/Keys"),
     ]
 
     screen_mode = reactive("menu")
@@ -95,6 +102,23 @@ class PRTrackApp(App):
         self._overlay_container: Vertical | None = None
         self._overlay_list: ListView | None = None
         self._overlay_select_action: Callable[[str], None] | None = None
+        # Markdown selection state
+        self._md_mode: bool = False
+        self._md_selected: dict[tuple[str, int], PullRequest] = {}
+        self._md_scope: tuple[str, str | None] | None = None  # (kind, value)
+        self._settings_page_index: int = int(getattr(self.cfg, "settings_page_index", 0) or 0)
+        # Key mapping (defaults in code, optional overrides from cfg)
+        self._keymap_defaults: dict[str, str] = {
+            "next_page": "]",
+            "prev_page": "[",
+            "open_pr": "enter",
+            "mark_markdown": "m",
+            "back": "backspace",
+        }
+        self._keymap: dict[str, str] = {
+            **self._keymap_defaults,
+            **getattr(self.cfg, "keymap", {}),
+        }
 
     def compose(self) -> ComposeResult:
         """Compose the main layout containing header, menu, status, table, and footer."""
@@ -119,10 +143,42 @@ class PRTrackApp(App):
             self._overlay_list = None
             self._overlay_select_action = None
         # Ensure any prompt overlays are removed to avoid duplicate IDs
-        for pid in ("prompt_one", "prompt_two"):
-            with contextlib.suppress(Exception):
-                self.query_one(f"#{pid}").remove()
+        self._remove_all_prompts()
+        # Exit markdown mode if active
+        self._md_mode = False
+        self._md_scope = None
         self._show_menu()
+
+    def action_go_back(self) -> None:
+        """Context back: close overlays or return to previous selection menu."""
+        # Always clear prompts first
+        self._remove_all_prompts()
+        # Close overlay if open
+        if self._overlay_container is not None:
+            with contextlib.suppress(Exception):
+                self._overlay_container.remove()
+            self._overlay_container = None
+            self._overlay_list = None
+            self._overlay_select_action = None
+            # If we were in a config/menu overlay, go home
+            # Also exit markdown mode when leaving overlays back to home
+            self._md_mode = False
+            self._md_scope = None
+            self._show_menu()
+            return
+        # If in markdown selection table, return to markdown menu
+        if self._md_mode and self._table.display:
+            self._show_markdown_menu()
+            return
+        # Otherwise go home
+        self._show_menu()
+
+    def action_accept_markdown_selection(self) -> None:
+        """In markdown selection mode, return to the markdown menu."""
+        if not self._md_mode:
+            return
+        # Return to the markdown menu without clearing selection
+        self._show_markdown_menu()
 
     def _show_menu(self) -> None:
         """Display the main menu and hide the table."""
@@ -299,6 +355,9 @@ class PRTrackApp(App):
         start = (self._page - 1) * self._page_size
         end = start + self._page_size
         self._table.set_prs(self._current_prs[start:end])
+        # Update status in markdown mode
+        if self._md_mode:
+            self._update_markdown_status()
 
     def _current_scope_key(self) -> str:
         """Return the current scope key used for refresh metadata."""
@@ -495,7 +554,7 @@ class PRTrackApp(App):
         # Use Textual's built-in notification system
         self.notify(message, title="PR Tracker", timeout=3)
 
-    def on_list_view_selected(self, event: ListView.Selected) -> None:
+    def on_list_view_selected(self, event: ListView.Selected) -> None:  # noqa: PLR0912
         """Handle item selection from either the main menu or overlays.
 
         Args:
@@ -555,8 +614,10 @@ class PRTrackApp(App):
                         accounts,
                         select_action=self._load_account_prs,
                     )
+                case "save_markdown":
+                    self._show_markdown_menu()
                 case "config":
-                    self._show_config_menu()
+                    self._show_config_menu(is_from_main_menu=True)
                 case "exit":
                     self.exit()
             return
@@ -589,9 +650,58 @@ class PRTrackApp(App):
         scope = self._current_scope_key()
         self._update_status_label(scope, refreshing=False)
 
-    def on_key(self, event) -> None:  # type: ignore[override]
-        """Workaround for ListView wrap: manually wrap selection on up/down keys."""
+    def on_key(self, event) -> None:  # type: ignore[override]  # noqa: PLR0911, PLR0912, PLR0915
+        """Key handling: wrapping for lists and custom key mappings."""
         key = getattr(event, "key", None)
+        if key is None:
+            return
+        # Custom key mapping (in addition to Textual bindings)
+        try:
+            table_active = (
+                self._table.display
+                and self._overlay_container is None
+                and not self._menu.display
+                and self._table_has_focus()
+            )
+            # Mark in markdown mode via custom key (e.g., allow "enter" to mark)
+            if self._md_mode and table_active and key == self._keymap.get("mark_markdown"):
+                self.action_toggle_markdown_pr()
+                with contextlib.suppress(Exception):
+                    event.prevent_default()
+                event.stop()
+                return
+            # Open PR link via custom key when not in markdown mode
+            if (not self._md_mode) and table_active and key == self._keymap.get("open_pr"):
+                pr = self._table.get_selected_pr()
+                if pr:
+                    webbrowser.open(pr.html_url)
+                    with contextlib.suppress(Exception):
+                        event.prevent_default()
+                    event.stop()
+                    return
+            # Pagination keys
+            if key == self._keymap.get("next_page"):
+                self.action_next_page()
+                with contextlib.suppress(Exception):
+                    event.prevent_default()
+                event.stop()
+                return
+            if key == self._keymap.get("prev_page"):
+                self.action_prev_page()
+                with contextlib.suppress(Exception):
+                    event.prevent_default()
+                event.stop()
+                return
+            # Back key
+            if key == self._keymap.get("back"):
+                self.action_go_back()
+                with contextlib.suppress(Exception):
+                    event.prevent_default()
+                event.stop()
+                return
+        except Exception:
+            pass
+        # Workaround for ListView wrap: manually wrap selection on up/down keys
         if key not in {"up", "down"}:
             return
         target = None
@@ -640,10 +750,8 @@ class PRTrackApp(App):
             return 0
         return None
 
-    def _show_list(
-        self, title: str, items: list[str], select_action: Callable[[str], None] | None = None
-    ) -> None:
-        """Show a selectable overlay list.
+    def _show_list(self, title: str, items: list[str], select_action=None) -> None:
+        """Display a list overlay for selecting an item.
 
         Args:
             title: Title displayed above the list.
@@ -652,6 +760,15 @@ class PRTrackApp(App):
         """
         self._menu.display = False
         self._table.display = False
+        # Clear any stray prompts before mounting an overlay
+        self._remove_all_prompts()
+        # Replace existing overlay container if present (avoid stacking)
+        if self._overlay_container is not None:
+            with contextlib.suppress(Exception):
+                self._overlay_container.remove()
+            self._overlay_container = None
+            self._overlay_list = None
+            self._overlay_select_action = None
         # Build items without IDs (some values contain slashes or spaces). Store original value.
         li_items: list[ListItem] = []
         for it in items:
@@ -676,6 +793,13 @@ class PRTrackApp(App):
         self._overlay_container = container
         self._overlay_list = list_view
         self._overlay_select_action = select_action
+
+    def _table_has_focus(self) -> bool:
+        """Return True if the inner DataTable currently has keyboard focus."""
+        try:
+            return bool(getattr(self._table.table, "has_focus", False))
+        except Exception:
+            return False
 
     def _select_repo(self, repo_name: str) -> None:
         """Handle repo selection by displaying PRs for the chosen repo.
@@ -715,6 +839,9 @@ class PRTrackApp(App):
         Args:
             message: Message carrying the `PullRequest` to open.
         """
+        # In markdown selection mode, ignore open on Enter
+        if self._md_mode:
+            return
         webbrowser.open(message.pr.html_url)
 
     def on_pr_table_pr_refresh_requested(self, message: PRTable.PRRefreshRequested) -> None:
@@ -727,8 +854,14 @@ class PRTrackApp(App):
 
     # ---------------- Config menu ----------------
 
-    def _show_config_menu(self) -> None:
-        """Display configuration actions menu as an overlay list."""
+    def _show_config_menu(self, is_from_main_menu: bool = False) -> None:
+        """Display Settings menu as an overlay list."""
+        # Reset pagination when entering Settings from main menu
+        if self._overlay_container is None:
+            if is_from_main_menu:
+                self._settings_page_index = 0
+            else:
+                self._settings_page_index = int(getattr(self.cfg, "settings_page_index", 0) or 0)
         actions = [
             ("add_repo", "Add repo"),
             ("remove_repo", "Remove repo"),
@@ -736,11 +869,30 @@ class PRTrackApp(App):
             ("remove_account", "Remove account"),
             ("set_stale", "Set staleness threshold (seconds)"),
             ("set_page_size", "Set PRs per page"),
+            ("set_settings_page_size", "Set Settings menu page size"),
             ("update_token", "Update GitHub token"),
+            ("keymap_menu", "Key bindings"),
+            ("show_keymap", "Show current key bindings"),
             ("show_config", "Show current config"),
-            ("back", "Back"),
         ]
-        self._show_choice_menu("Config", actions)
+        # Paginate actions
+        page_size = max(1, int(getattr(self.cfg, "menu_page_size", 5)))
+        total = len(actions)
+        pages = max(1, (total + page_size - 1) // page_size)
+        index = max(0, min(self._settings_page_index, pages - 1))
+        start = index * page_size
+        end = min(start + page_size, total)
+        page_actions = actions[start:end]
+        # Navigation controls
+        if pages > 1:
+            if index > 0:
+                page_actions.append(("settings_prev", "Previous"))
+            if index < pages - 1:
+                page_actions.append(("settings_next", "Next"))
+        # Always include Back at the end
+        page_actions.append(("back", "Back"))
+        title = f"Settings (Page {index+1}/{pages})" if pages > 1 else "Settings"
+        self._show_choice_menu(title, page_actions)
 
     def _show_choice_menu(self, title: str, actions: list[tuple[str, str]]) -> None:
         """Show a simple menu of labeled actions.
@@ -752,6 +904,13 @@ class PRTrackApp(App):
         self._menu.display = False
         self._table.display = False
         # Build items without IDs; keep the action key on the item
+        # Replace existing overlay container if present (avoid stacking)
+        if self._overlay_container is not None:
+            with contextlib.suppress(Exception):
+                self._overlay_container.remove()
+            self._overlay_container = None
+            self._overlay_list = None
+            self._overlay_select_action = None
         li_actions: list[ListItem] = []
         for key, lbl in actions:
             li = ListItem(Label(lbl))
@@ -777,7 +936,145 @@ class PRTrackApp(App):
         # Wrap to route to config action handler
         self._overlay_select_action = lambda key: self._handle_config_action(key)
 
-    def _handle_config_action(self, action: str) -> None:
+    # ---------- Markdown selection & export ----------
+
+    def _show_markdown_menu(self) -> None:
+        actions = [
+            ("md_by_repo", "Select PRs by Repo"),
+            ("md_by_account", "Select PRs by Account"),
+            ("md_review", f"Review Selection ({len(self._md_selected)})"),
+            ("md_save", "Save Selected to Markdown"),
+            ("back", "Back"),
+        ]
+        self._show_choice_menu("Save PRs to Markdown", actions)
+        # Rewire overlay handler to markdown actions
+        self._overlay_select_action = lambda key: self._handle_markdown_action(key)
+
+    def _handle_markdown_action(self, action: str) -> None:
+        match action:
+            case "md_by_repo":
+                self._show_list(
+                    "Repos",
+                    [r.name for r in self.cfg.repositories],
+                    select_action=self._md_select_repo,
+                )
+            case "md_by_account":
+                accounts = sorted(
+                    set(self.cfg.global_users)
+                    | {u for r in self.cfg.repositories for u in (r.users or [])}
+                )
+                self._show_list(
+                    "Accounts",
+                    accounts,
+                    select_action=self._md_select_account,
+                )
+            case "md_review":
+                self._md_review_selection()
+            case "md_save":
+                self._prompt_save_markdown()
+            case _:
+                self._show_menu()
+
+    def _update_markdown_status(self) -> None:
+        scope = self._current_scope_key()
+        count = len(self._md_selected)
+        base = "Selecting for Markdown"
+        mk = self._keymap.get("mark_markdown", "m")
+        bk = self._keymap.get("back", "backspace")
+        # Keep line length under 100 chars
+        msg = (
+            f"{base} • Selected: {count} • Scope: {scope} • Keys: "
+            f"mark='{mk}', back='{bk}', accept='enter'"
+        )
+        self._status.update(msg)
+        self._status.display = True
+
+    def _enter_md_mode(self, kind: str, value: str | None) -> None:
+        self._md_mode = True
+        self._md_scope = (kind, value)
+        self._update_markdown_status()
+
+    def _md_select_repo(self, repo_name: str) -> None:
+        self._show_cached_repo(repo_name)
+        self._enter_md_mode("repo", repo_name)
+
+    def _md_select_account(self, account: str) -> None:
+        self._show_cached_account(account)
+        self._enter_md_mode("account", account)
+
+    def action_toggle_markdown_pr(self) -> None:
+        # Only allow marking when in markdown mode AND table is active and focused
+        if not (
+            self._md_mode
+            and self._table.display
+            and self._overlay_container is None
+            and self._table_has_focus()
+        ):
+            return
+        pr = self._table.get_selected_pr()
+        if not pr:
+            return
+        key = (pr.repo, pr.number)
+        if key in self._md_selected:
+            del self._md_selected[key]
+            self._show_toast(f"Unmarked {pr.repo}#{pr.number}")
+        else:
+            self._md_selected[key] = pr
+            self._show_toast(f"Marked {pr.repo}#{pr.number}")
+        self._update_markdown_status()
+
+    def _md_review_selection(self) -> None:
+        items = [f"{repo}#{num} - {pr.title}" for (repo, num), pr in self._md_selected.items()]
+        if not items:
+            self._show_toast("No PRs selected")
+            self._show_markdown_menu()
+            return
+        # Selecting an item will deselect it
+        self._show_list(
+            "Review Selection - select to remove", items, select_action=self._md_deselect
+        )
+
+    def _md_deselect(self, label: str) -> None:
+        # label format: "owner/repo#num - title"
+        try:
+            left = label.split(" - ", 1)[0]
+            repo, num_str = left.split("#", 1)
+            key = (repo, int(num_str))
+            if key in self._md_selected:
+                del self._md_selected[key]
+                self._show_toast(f"Removed {repo}#{num_str}")
+        except Exception:
+            pass
+        self._show_markdown_menu()
+
+    def _prompt_save_markdown(self) -> None:
+        if not self._md_selected:
+            self._show_toast("No PRs selected")
+            self._show_markdown_menu()
+            return
+        default_path = os.path.join(os.getcwd(), "pr-track.md")
+        # Reuse one-field prompt
+        self._prompt_one_field(
+            "Output markdown path (empty = CWD/pr-track.md)", default_path, self._do_save_markdown
+        )
+
+    def _do_save_markdown(self, path: str) -> None:
+        outfile = path.strip() or os.path.join(os.getcwd(), "pr-track.md")
+        # Create parent dirs if needed
+        with contextlib.suppress(Exception):
+            os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
+        try:
+            count = len(self._md_selected)
+            write_prs_markdown(self._md_selected.values(), outfile)
+            self._show_toast(f"Saved {count} PR(s) to {outfile}")
+        except Exception:
+            self._show_toast("Failed to save markdown")
+        # Exit md mode back to menu but keep selection for convenience
+        self._md_mode = False
+        self._md_scope = None
+        self._show_menu()
+
+    def _handle_config_action(self, action: str) -> None:  # noqa: PLR0912
         """Route a selected config action to its handler.
 
         Args:
@@ -796,12 +1093,108 @@ class PRTrackApp(App):
                 self._prompt_set_staleness_threshold()
             case "set_page_size":
                 self._prompt_set_pr_page_size()
+            case "set_settings_page_size":
+                self._prompt_set_settings_menu_page_size()
             case "update_token":
                 self._prompt_update_token()
+            case "keymap_menu":
+                self._show_keymap_menu()
+            case "show_keymap":
+                self._show_current_keymap()
             case "show_config":
                 self._show_current_config()
+            case "settings_next":
+                self._settings_page_index += 1
+                self.cfg.settings_page_index = self._settings_page_index
+                save_config(self.cfg)
+                self._show_config_menu()
+            case "settings_prev":
+                self._settings_page_index = max(0, self._settings_page_index - 1)
+                self.cfg.settings_page_index = self._settings_page_index
+                save_config(self.cfg)
+                self._show_config_menu()
             case _:
                 self._show_menu()
+
+    def action_show_keymap_overlay(self) -> None:
+        """Show an overlay with current key bindings; selecting any item closes it."""
+        items: list[str] = []
+        items.append("Key bindings (press Back or select any item to close):")
+        for k in sorted(self._keymap.keys()):
+            ov = self.cfg.keymap.get(k) if hasattr(self.cfg, "keymap") else None
+            mark = " (default)" if ov is None else ""
+            items.append(f"{k}: {self._keymap[k]}{mark}")
+        self._show_list(
+            "Help / Key bindings", items, select_action=lambda _val: self.action_go_back()
+        )
+
+    # ---------- Keymap settings ----------
+
+    def _show_current_keymap(self) -> None:
+        lines = ["Current Key Bindings (overrides shown; defaults in code):"]
+        for k, v in self._keymap.items():
+            ov = self.cfg.keymap.get(k) if hasattr(self.cfg, "keymap") else None
+            mark = " (default)" if ov is None else ""
+            lines.append(f"{k}: {v}{mark}")
+        static = Static("\n".join(lines))
+        self.mount(static)
+
+        def close_and_back():
+            static.remove()
+            self._show_config_menu()
+
+        self.set_timer(2.0, close_and_back)
+
+    def _show_keymap_menu(self) -> None:
+        items = [
+            ("next_page", f"next_page → '{self._keymap.get('next_page', '')}'"),
+            ("prev_page", f"prev_page → '{self._keymap.get('prev_page', '')}'"),
+            ("open_pr", f"open_pr → '{self._keymap.get('open_pr', '')}'"),
+            ("mark_markdown", f"mark_markdown → '{self._keymap.get('mark_markdown', '')}'"),
+            ("back", f"back → '{self._keymap.get('back', '')}'"),
+            ("reset_all", "Reset all to defaults"),
+            ("back", "Back"),
+        ]
+        self._show_choice_menu("Key bindings", items)
+        self._overlay_select_action = lambda key: self._handle_keymap_action(key)
+
+    def _handle_keymap_action(self, action: str) -> None:
+        if action == "reset_all":
+            self.cfg.keymap = {}
+            save_config(self.cfg)
+            self._keymap = {**self._keymap_defaults}
+            self._show_keymap_menu()
+            return
+        if action in self._keymap_defaults:
+            current = self._keymap.get(action, "")
+            self._prompt_one_field(
+                f"Set key for {action} (empty to reset)",
+                current,
+                lambda v, a=action: self._do_set_keymap(a, v),
+            )
+            return
+        self._show_config_menu()
+
+    def _do_set_keymap(self, action: str, value: str) -> None:
+        key = value.strip().lower()
+        # Empty value resets to default by removing override
+        if not key:
+            with contextlib.suppress(Exception):
+                if action in self.cfg.keymap:
+                    del self.cfg.keymap[action]
+            self._keymap[action] = self._keymap_defaults.get(action, key)
+        else:
+            # Prevent duplicate bindings across actions to avoid conflicts
+            for act, mapped in list(self._keymap.items()):
+                if act != action and mapped == key:
+                    self._keymap[act] = self._keymap_defaults.get(act, mapped)
+                    with contextlib.suppress(Exception):
+                        if act in self.cfg.keymap:
+                            del self.cfg.keymap[act]
+            self.cfg.keymap[action] = key
+            self._keymap[action] = key
+        save_config(self.cfg)
+        self._show_keymap_menu()
 
     def _prompt_add_repo(self) -> None:
         """Prompt the user to add a repository and optional users."""
@@ -966,9 +1359,7 @@ class PRTrackApp(App):
             cb: Callback invoked with the input string upon confirmation.
         """
         # Remove existing prompt containers if any to ensure unique IDs
-        for pid in ("prompt_one", "prompt_two"):
-            with contextlib.suppress(Exception):
-                self.query_one(f"#{pid}").remove()
+        self._remove_all_prompts()
         container = Vertical(
             Label(title), Input(placeholder=placeholder), Horizontal(Button("OK"), Button("Cancel"))
         )
@@ -1002,11 +1393,33 @@ class PRTrackApp(App):
 
     def _do_set_pr_page_size(self, value: str) -> None:
         with contextlib.suppress(Exception):
-            size = max(1, int(value.strip()))
+            size = int(value.strip())
+            if size <= 0:
+                raise ValueError("page size must be > 0")
             self.cfg.pr_page_size = size  # type: ignore[attr-defined]
             self._page_size = size
             save_config(self.cfg)
         self._show_menu()
+
+    def _prompt_set_settings_menu_page_size(self) -> None:
+        """Prompt for Settings menu page size."""
+        self._prompt_one_field(
+            "Set Settings menu page size",
+            str(getattr(self.cfg, "menu_page_size", 5)),
+            self._do_set_settings_menu_page_size,
+        )
+
+    def _do_set_settings_menu_page_size(self, value: str) -> None:
+        try:
+            size = int(value.strip())
+            if size <= 0:
+                raise ValueError
+            self.cfg.menu_page_size = size
+            save_config(self.cfg)
+            self._settings_page_index = 0
+        except Exception:
+            self._show_toast("Invalid number (> 0)")
+        self._show_config_menu()
 
     def _prompt_two_fields(self, title: str, ph1: str, ph2: str, cb) -> None:
         """Create a two-field input prompt overlay.
@@ -1030,6 +1443,16 @@ class PRTrackApp(App):
         container.id = "prompt_two"
         container.data_cb = cb  # type: ignore[attr-defined]
         self.mount(container)
+
+    def _remove_all_prompts(self) -> None:
+        """Remove all prompt overlays (one and two-field) if present."""
+        try:
+            for pid in ("prompt_one", "prompt_two"):
+                for node in list(self.query(f"#{pid}")):
+                    with contextlib.suppress(Exception):
+                        node.remove()
+        except Exception:
+            pass
 
     def on_button_pressed(self, event: Button.Pressed) -> None:  # Textual event handler
         """Handle OK/Cancel button presses for prompt overlays.

@@ -99,7 +99,36 @@ class PRTable(Static):
         # Check if row_index is an integer and within the bounds of the prs list
         if isinstance(row_index, int) and 0 <= row_index < len(self.prs):
             pr = self.prs[row_index]
-            webbrowser.open(pr.html_url)
+            # Emit a message instead of opening directly; the App decides behavior
+            self.post_message(PRTable.OpenRequested(pr))
+
+    def get_selected_pr(self) -> PullRequest | None:
+        """Return the PR corresponding to the current table cursor, if any."""
+        try:
+            cursor_row = self.table.cursor_row
+            if cursor_row < 0:
+                return None
+            try:
+                key = self.table.row_keys[cursor_row]
+            except Exception:
+                key = None
+            if hasattr(key, "value"):
+                key = key.value
+            if isinstance(key, int) and 0 <= key < len(self.prs):
+                return self.prs[key]
+            # Fallback: map via first column (repo and number) if keys unavailable
+            try:
+                row = self.table.get_row_at(cursor_row)
+                repo = row[0]
+                number = int(row[1])
+                for pr in self.prs:
+                    if pr.repo == repo and pr.number == number:
+                        return pr
+            except Exception:
+                return None
+        except Exception:
+            return None
+        return None
 
     def action_refresh_pr(self) -> None:
         # Get the currently selected row

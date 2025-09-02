@@ -46,6 +46,7 @@ On first run, the application will create a configuration file at `~/.config/prt
 - **Local caching**: Stores PR data locally for faster access and offline viewing
 - **Intuitive TUI**: Clean, text-based interface with keyboard navigation
 - **Configuration management**: Easily add/remove repositories and configure settings through the UI
+ - **Save to Markdown**: Select PRs and export them as a numbered Markdown list in the format `N. [n/2 Approval] [Title](URL)`
 
    - Press `Enter` to access the main menu
    - Select "Adjust config"
@@ -61,6 +62,7 @@ PR Tracker stores its configuration in `~/.config/prtrack/config.json`. You can 
 - **GitHub token**: Personal access token for accessing private repositories
 - **Staleness threshold**: Time in seconds before cached data is considered stale (default: 300 seconds)
 - **PRs per page**: Number of PRs displayed per page (default: 10)
+ - **Key mapping (optional)**: Override default keys for navigation and actions (see Key Customization)
 
 ### GitHub Personal Access Token
 
@@ -123,9 +125,55 @@ While using PR Tracker, you can navigate and interact with the application using
 - `Enter`: Select menu items or open PRs
 - `q`: Quit the application
 - `Escape`: Return to the main menu
+- `Backspace`: Go back (close overlays, return from selection views)
 - `r`: Refresh current view
 - `]`: Next page (when viewing PRs)
 - `[`: Previous page (when viewing PRs)
+- `m`: Mark/unmark PR for Markdown while in selection mode
+
+### Markdown Export Flow
+
+1. From the main menu, choose "Save PRs to Markdown".
+2. Select by Repo or Account to enter selection mode (you can repeat to add from multiple scopes).
+3. In selection mode, move the cursor and press `m` to mark/unmark PRs.
+4. Press `Enter` to return to the Markdown menu.
+5. Use "Review Selection" to view and deselect (select an item to remove it).
+6. Choose "Save Selected to Markdown" and confirm the output path (default: `./pr-track.md`).
+
+The output format per PR is:
+
+```
+1. [n/2 Approval] [Title](URL)
+```
+
+Where `n` is the current number of approvals (0 if none).
+
+### Key Customization
+
+You can optionally override certain keys via `~/.config/prtrack/config.json` under `keymap`. Defaults live in code and are safe; only your overrides are stored in the file. Supported keys:
+
+- `next_page` (default: "]")
+- `prev_page` (default: "[")
+- `open_pr` (default: "enter")
+- `mark_markdown` (default: "m")
+- `back` (default: "backspace")
+
+Example:
+
+```json
+{
+  "keymap": {
+    "mark_markdown": "enter",
+    "next_page": "l",
+    "prev_page": "h"
+  }
+}
+```
+
+Notes:
+
+- When in Markdown selection mode, mapping `mark_markdown` to `enter` will toggle mark/unmark with Enter. The default Enter action to accept is suppressed while marking, so it works as expected.
+- `Escape` always returns to Home; `Backspace` navigates back contextually.
 
 ### Test Coverage
 
