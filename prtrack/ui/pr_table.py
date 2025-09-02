@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import webbrowser
 from collections.abc import Iterable
 
 from textual.message import Message
@@ -26,6 +27,7 @@ class PRTable(Static):
         super().__init__()
         self.title = title
         self.table = DataTable(cursor_type="row")
+        self.prs: list[PullRequest] = []  # Store PRs for reference
 
     def compose(self):  # type: ignore[override]
         yield Label(self.title, id="table-title")
@@ -62,7 +64,8 @@ class PRTable(Static):
                 "Status",
                 "Approvals",
             )
-        for pr in prs:
+        self.prs = list(prs)  # Store PRs for reference
+        for i, pr in enumerate(self.prs):
             try:
                 self.table.add_row(
                     pr.repo,
@@ -73,7 +76,7 @@ class PRTable(Static):
                     pr.branch,
                     "Draft" if pr.draft else "Ready",
                     str(pr.approvals),
-                    key=pr,
+                    key=i,  # Use index as key
                 )
             except Exception:
                 # Fallback without key if API differs
@@ -89,9 +92,14 @@ class PRTable(Static):
                 )
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:  # type: ignore[override]
-        pr = event.row_key
-        if isinstance(pr, PullRequest):
-            self.post_message(self.OpenRequested(pr))
+        row_index = event.row_key
+        # Try to get the value attribute if it exists
+        if hasattr(row_index, "value"):
+            row_index = row_index.value
+        # Check if row_index is an integer and within the bounds of the prs list
+        if isinstance(row_index, int) and 0 <= row_index < len(self.prs):
+            pr = self.prs[row_index]
+            webbrowser.open(pr.html_url)
 
     def action_refresh_pr(self) -> None:
         # Get the currently selected row
@@ -109,3 +117,29 @@ class PRTable(Static):
                 key = None
         if isinstance(key, PullRequest):
             self.post_message(PRTable.PRRefreshRequested(key))
+
+    def action_open_selected_pr(self) -> None:
+        """Open the selected PR in the default web browser.
+
+        This action is triggered when the user presses Enter on a selected PR row.
+        """
+        # Get the currently selected row
+        cursor_row = self.table.cursor_row
+        if cursor_row < 0:
+            return
+        # Some Textual versions store the key separately; safer to fetch via API
+        try:
+            key = self.table.row_keys[cursor_row]
+        except Exception:
+            # Fallback: attempt to derive from first column
+            try:
+                key = self.table.get_row_at(cursor_row)[0]
+            except Exception:
+                key = None
+        # Check if key is a RowKey object and get its value
+        if hasattr(key, "value"):
+            key = key.value
+        if isinstance(key, int) and 0 <= key < len(self.prs):
+            pr = self.prs[key]
+            # Post the OpenRequested message to open the PR in the browser
+            webbrowser.open(pr.html_url)
