@@ -31,6 +31,56 @@ prtrack
 
 On first run, the application will create a configuration file at `~/.config/prtrack/config.json`.
 
+### CLI Commands
+
+PR Tracker provides several command-line interface commands for managing the tool:
+
+```bash
+# Launch the TUI application
+prtrack
+
+# Show version information
+prtrack --version
+prtrack -v
+
+# Show help message
+prtrack --help
+prtrack -h
+
+# Update the tool to the latest version
+prtrack update
+```
+
+### Updating the Tool
+
+To update PR Tracker to the latest version, you can use the built-in update command:
+
+```bash
+prtrack update
+```
+
+This command uses `uv tool upgrade` to update the tool. If uv is not installed, you'll need to install it from [https://docs.astral.sh/uv/](https://docs.astral.sh/uv/).
+
+Alternatively, you can manually update the tool using uv:
+
+```bash
+uv tool upgrade prtrack
+```
+
+### Uninstalling the Tool
+
+To uninstall PR Tracker, you can use the uv tool uninstall command:
+
+```bash
+uv tool uninstall prtrack
+```
+
+This will remove the prtrack tool but will not delete your configuration or cached data. If you want to completely remove all data, you can manually delete the `~/.config/prtrack/` directory:
+
+```bash
+rm -rf ~/.config/prtrack/
+```
+
 ### Initial Setup
 
 1. When you first run the application, you'll need to configure it:

@@ -25,6 +25,9 @@ def main() -> None:
         elif command in ("--version", "-v"):
             print(f"prtrack {__version__}")
             return
+        elif command in ("--help", "-h"):
+            print_help()
+            return
 
     # Default behavior: launch the TUI
     PRTrackApp().run()
@@ -48,3 +51,29 @@ def update_tool() -> NoReturn:
         print("Error: uv is not installed or not found in PATH.", file=sys.stderr)
         print("Please install uv from https://docs.astral.sh/uv/", file=sys.stderr)
         sys.exit(1)
+
+
+def print_help() -> None:
+    """Print help message for prtrack CLI commands.
+
+    Returns:
+        None
+    """
+    help_text = """prtrack - Terminal-based GitHub PR tracker
+
+Usage:
+  prtrack              Launch the TUI application
+  prtrack update       Update the prtrack tool
+  prtrack --version    Show version information
+  prtrack --help       Show this help message
+
+Commands:
+  update               Update the prtrack tool using uv
+
+Options:
+  -h, --help           Show this help message
+  -v, --version        Show version information
+
+For more information, visit: https://github.com/RavindraGDP/prtrack
+"""
+    print(help_text)
