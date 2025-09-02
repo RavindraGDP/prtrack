@@ -20,9 +20,7 @@ def temp_storage_dir(monkeypatch):
         yield config_dir
 
 
-def make_pr(
-    repo: str, number: int, author: str = "testuser", assignees: list[str] | None = None
-) -> PullRequest:
+def make_pr(repo: str, number: int, author: str = "testuser", assignees: list[str] | None = None) -> PullRequest:
     """Create a test PullRequest object."""
     return PullRequest(
         repo=repo,

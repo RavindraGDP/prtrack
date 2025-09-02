@@ -58,9 +58,7 @@ def record_last_refresh(scope: str, ts: int | None = None) -> None:
     if ts is None:
         ts = int(time.time())
     with _connect() as conn:
-        conn.execute(
-            "REPLACE INTO metadata(key, value) VALUES (?, ?)", (f"last_refresh:{scope}", str(ts))
-        )
+        conn.execute("REPLACE INTO metadata(key, value) VALUES (?, ?)", (f"last_refresh:{scope}", str(ts)))
 
 
 def get_last_refresh(scope: str) -> int | None:

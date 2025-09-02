@@ -18,3 +18,10 @@ repos:
         args: [ --fix ]
       - id: ruff-format
         types_or: [ python, pyi, jupyter ]
+  - repo: local
+    hooks:
+      - id: check-type-annotations
+        name: Check type annotations
+        entry: python scripts/check_type_annotations.py
+        language: system
+        types: [python]

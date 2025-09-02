@@ -65,9 +65,7 @@ def test_set_prs_adds_rows_and_stores():
     table = PRTable("PRs")
     table.on_mount()
     prs = [
-        make_pr(
-            "org/repo1", 1, title="One", assignees=["a1"], branch="feat/x", draft=False, approvals=2
-        ),
+        make_pr("org/repo1", 1, title="One", assignees=["a1"], branch="feat/x", draft=False, approvals=2),
         make_pr(
             "org/repo2",
             2,

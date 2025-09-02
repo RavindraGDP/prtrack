@@ -36,9 +36,7 @@ def test_save_and_load_config_uses_json(tmp_path: Path, monkeypatch: pytest.Monk
     assert loaded.repositories[0].users == ["bob"]
 
 
-def test_load_config_creates_default_when_missing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_load_config_creates_default_when_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     conf_dir = tmp_path / ".config" / "prtrack"
     conf_path = conf_dir / "config.json"
     monkeypatch.setattr(cfgmod, "CONFIG_DIR", conf_dir)

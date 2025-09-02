@@ -244,9 +244,9 @@ class PRTrackApp(App):
         except ValueError:
             return []
         prs = await self.client.list_open_prs(owner, repo)
-        users = set(
-            next((r.users or [] for r in self.cfg.repositories if r.name == repo_name), [])
-        ) or set(self.cfg.global_users)
+        users = set(next((r.users or [] for r in self.cfg.repositories if r.name == repo_name), [])) or set(
+            self.cfg.global_users
+        )
         if users:
             prs = filter_prs(prs, users)
         prs.sort(key=lambda p: p.number, reverse=True)
@@ -825,8 +825,7 @@ class PRTrackApp(App):
                 # Push current screen to navigation stack before showing account list
                 self._navigation_stack.append("markdown_menu")
                 accounts = sorted(
-                    set(self.cfg.global_users)
-                    | {u for r in self.cfg.repositories for u in (r.users or [])}
+                    set(self.cfg.global_users) | {u for r in self.cfg.repositories for u in (r.users or [])}
                 )
                 self._show_list(
                     "Accounts",
@@ -849,10 +848,7 @@ class PRTrackApp(App):
         mk = self._keymap.get("mark_markdown", "m")
         bk = self._keymap.get("back", "backspace")
         # Keep line length under 100 chars
-        msg = (
-            f"{base} • Selected: {count} • Scope: {scope} • Keys: "
-            f"mark='{mk}', back='{bk}', accept='enter'"
-        )
+        msg = f"{base} • Selected: {count} • Scope: {scope} • Keys: " f"mark='{mk}', back='{bk}', accept='enter'"
         self._status.update(msg)
         self._status.display = True
 
@@ -875,12 +871,7 @@ class PRTrackApp(App):
 
     def action_toggle_markdown_pr(self) -> None:
         # Only allow marking when in markdown mode AND table is active and focused
-        if not (
-            self._md_mode
-            and self._table.display
-            and self._overlay_container is None
-            and self._table_has_focus()
-        ):
+        if not (self._md_mode and self._table.display and self._overlay_container is None and self._table_has_focus()):
             return
         pr = self._table.get_selected_pr()
         if not pr:
@@ -901,9 +892,7 @@ class PRTrackApp(App):
             self._show_markdown_menu()
             return
         # Selecting an item will deselect it
-        self._show_list(
-            "Review Selection - select to remove", items, select_action=self._md_deselect
-        )
+        self._show_list("Review Selection - select to remove", items, select_action=self._md_deselect)
 
     def _md_deselect(self, label: str) -> None:
         # label format: "owner/repo#num - title"
@@ -925,9 +914,7 @@ class PRTrackApp(App):
             return
         default_path = os.path.join(os.getcwd(), "pr-track.md")
         # Reuse one-field prompt
-        self._prompt_one_field(
-            "Output markdown path (empty = CWD/pr-track.md)", default_path, self._do_save_markdown
-        )
+        self._prompt_one_field("Output markdown path (empty = CWD/pr-track.md)", default_path, self._do_save_markdown)
 
     def _do_save_markdown(self, path: str) -> None:
         outfile = path.strip() or os.path.join(os.getcwd(), "pr-track.md")
@@ -989,9 +976,7 @@ class PRTrackApp(App):
             ov = self.cfg.keymap.get(k) if hasattr(self.cfg, "keymap") else None
             mark = " (default)" if ov is None else ""
             items.append(f"{k}: {self._keymap[k]}{mark}")
-        self._show_list(
-            "Help / Key bindings", items, select_action=lambda _val: self.action_go_back()
-        )
+        self._show_list("Help / Key bindings", items, select_action=lambda _val: self.action_go_back())
 
     # ---------- Keymap settings ----------
 
@@ -1075,9 +1060,7 @@ class PRTrackApp(App):
         """Prompt the user to add a repository and optional users."""
         # Push current screen to navigation stack
         self._navigation_stack.append("config_menu")
-        self._prompt_two_fields(
-            "Add Repo", "owner/repo", "optional users (comma)", self._do_add_repo
-        )
+        self._prompt_two_fields("Add Repo", "owner/repo", "optional users (comma)", self._do_add_repo)
 
     def _do_add_repo(self, repo: str, users_csv: str) -> None:
         """Add a repository to the config.
@@ -1133,9 +1116,7 @@ class PRTrackApp(App):
         """Prompt to add an account globally or scoped to a repository."""
         # Push current screen to navigation stack
         self._navigation_stack.append("config_menu")
-        self._prompt_two_fields(
-            "Add Account", "username", "repo (owner/repo or empty=global)", self._do_add_account
-        )
+        self._prompt_two_fields("Add Account", "username", "repo (owner/repo or empty=global)", self._do_add_account)
 
     def _do_add_account(self, username: str, repo_name: str) -> None:
         """Add an account to global or per-repo tracked users.
@@ -1283,9 +1264,7 @@ class PRTrackApp(App):
         """
         # Remove existing prompt containers if any to ensure unique IDs
         self._remove_all_prompts()
-        container = Vertical(
-            Label(title), Input(placeholder=placeholder), Horizontal(Button("OK"), Button("Cancel"))
-        )
+        container = Vertical(Label(title), Input(placeholder=placeholder), Horizontal(Button("OK"), Button("Cancel")))
         container.id = "prompt_one"
         container.data_cb = cb  # type: ignore[attr-defined]
         self.mount(container)
@@ -1454,10 +1433,7 @@ class PRTrackApp(App):
             return True
         if self._navigation_stack and self._navigation_stack[-1] == "account_selection":
             self._navigation_stack.pop()
-            accounts = sorted(
-                set(self.cfg.global_users)
-                | {u for r in self.cfg.repositories for u in (r.users or [])}
-            )
+            accounts = sorted(set(self.cfg.global_users) | {u for r in self.cfg.repositories for u in (r.users or [])})
             self._show_list("Accounts", accounts, select_action=self._md_select_account)
             return True
         self._show_markdown_menu()
@@ -1514,10 +1490,7 @@ class PRTrackApp(App):
             ),
             "list_accounts": lambda: self._show_list(
                 "Tracked Accounts",
-                sorted(
-                    set(self.cfg.global_users)
-                    | {u for r in self.cfg.repositories for u in (r.users or [])}
-                ),
+                sorted(set(self.cfg.global_users) | {u for r in self.cfg.repositories for u in (r.users or [])}),
                 self._select_account,
             ),
             "prs_per_repo": lambda: self._show_list(
@@ -1525,10 +1498,7 @@ class PRTrackApp(App):
             ),
             "prs_per_account": lambda: self._show_list(
                 "Accounts",
-                sorted(
-                    set(self.cfg.global_users)
-                    | {u for r in self.cfg.repositories for u in (r.users or [])}
-                ),
+                sorted(set(self.cfg.global_users) | {u for r in self.cfg.repositories for u in (r.users or [])}),
                 self._load_account_prs,
             ),
             "save_markdown": self._show_markdown_menu,

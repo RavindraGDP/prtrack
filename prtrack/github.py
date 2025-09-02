@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -105,10 +106,8 @@ class GitHubClient:
                 )
             )
         # Fetch approvals for each PR concurrently
-        import asyncio as _asyncio
-
-        tasks = [_asyncio.create_task(self._count_approvals(owner, repo, pr.number)) for pr in prs]
-        results = await _asyncio.gather(*tasks, return_exceptions=True)
+        tasks = [asyncio.create_task(self._count_approvals(owner, repo, pr.number)) for pr in prs]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         for pr, approvals in zip(prs, results, strict=False):
             pr.approvals = int(approvals) if not isinstance(approvals, Exception) else 0
         return prs

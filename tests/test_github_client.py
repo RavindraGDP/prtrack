@@ -80,10 +80,7 @@ async def test_github_client_lists_prs_and_counts_approvals(
     # Approvals should be counted from reviews
     assert {p.number: p.approvals for p in prs} == {10: 2, 5: 0}
     # Headers should include Authorization when token is set
-    assert any(
-        "Authorization" in h and h["Authorization"].startswith("Bearer ")
-        for h in fake_client.seen_headers
-    )
+    assert any("Authorization" in h and h["Authorization"].startswith("Bearer ") for h in fake_client.seen_headers)
     # URLs should be correct (pulls then reviews per PR)
     assert fake_client.seen_urls[0].endswith("/repos/o/r/pulls")
     assert "/repos/o/r/pulls/10/reviews" in fake_client.seen_urls[1]

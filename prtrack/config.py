@@ -60,10 +60,7 @@ class AppConfig:
         return {
             "auth_token": self.auth_token,
             "global_users": self.global_users,
-            "repositories": [
-                {"name": r.name, **({"users": r.users} if r.users else {})}
-                for r in self.repositories
-            ],
+            "repositories": [{"name": r.name, **({"users": r.users} if r.users else {})} for r in self.repositories],
             "staleness_threshold_seconds": self.staleness_threshold_seconds,
             "pr_page_size": int(self.pr_page_size),
             "menu_page_size": int(self.menu_page_size),
