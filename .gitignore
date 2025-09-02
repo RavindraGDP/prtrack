@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+dist/
+wheelhouse/
+*.egg-info/
+.eggs/
+
+# Environments
+.venv/
+.uv/
+.env
+.env.*
+.venv*/
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.hypothesis/
+.nox/
+
+# Tools caches
+.ruff_cache/
+.mypy_cache/
+.cache/
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Project specific
+.textual/
