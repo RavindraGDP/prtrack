@@ -11,13 +11,12 @@ from typing import ClassVar
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Vertical
 from textual.reactive import reactive
 from textual.widgets import (
     Button,
     Footer,
     Header,
-    Input,
     Label,
     ListItem,
     ListView,
@@ -27,9 +26,8 @@ from textual.widgets import (
 from . import storage
 from .config import AppConfig, RepoConfig, load_config, save_config
 from .github import GITHUB_API, GitHubClient, PullRequest, filter_prs
-from .ui import PRTable
+from .ui import MenuManager, OverlayManager, PromptManager, PRTable, StatusManager
 from .utils.markdown import write_prs_markdown
-from .utils.time import format_time_ago
 
 
 @dataclass
@@ -121,6 +119,11 @@ class PRTrackApp(App):
             **self._keymap_defaults,
             **getattr(self.cfg, "keymap", {}),
         }
+        # Initialize UI managers
+        self._menu_manager = MenuManager(self)
+        self._overlay_manager = OverlayManager(self)
+        self._prompt_manager = PromptManager(self)
+        self._status_manager = StatusManager(self)
 
     def compose(self) -> ComposeResult:
         """Compose the main layout containing header, menu, status, table, and footer."""
@@ -169,13 +172,7 @@ class PRTrackApp(App):
 
     def _show_menu(self) -> None:
         """Display the main menu and hide the table."""
-        self.screen_mode = "menu"
-        self._menu.display = True
-        self._table.display = False
-        self._status.display = False
-        self._menu.focus()
-        # Clear navigation stack when going back to main menu
-        self._navigation_stack.clear()
+        self._menu_manager.show_menu()
 
     def action_refresh_current(self) -> None:
         """Refresh the data for the current view.
@@ -317,21 +314,7 @@ class PRTrackApp(App):
             scope: Scope key as used for refresh records.
             refreshing: Whether a background refresh is running.
         """
-        last = storage.get_last_refresh(scope)
-        if last is None:
-            text = "Last refresh: never"
-        else:
-            ago = max(0, int(time.time()) - int(last))
-            text = f"Last refresh: {format_time_ago(ago)}"
-        if refreshing:
-            text += " • Refreshing…"
-        # Append pagination info when applicable
-        total = len(self._current_prs)
-        if total:
-            pages = max(1, (total + self._page_size - 1) // self._page_size)
-            text += f" • Page {self._page}/{pages} ({total} PRs)"
-        self._status.update(text)
-        self._status.display = True
+        self._status_manager.update_status_label(scope, refreshing)
 
     def _render_current_page(self) -> None:
         """Render the current page from `_current_prs` into the table."""
@@ -618,41 +601,7 @@ class PRTrackApp(App):
             items: Items to display (also used as their IDs).
             select_action: Callback invoked with the selected item ID.
         """
-        self._menu.display = False
-        self._table.display = False
-        # Clear any stray prompts before mounting an overlay
-        self._remove_all_prompts()
-        # Replace existing overlay container if present (avoid stacking)
-        if self._overlay_container is not None:
-            with contextlib.suppress(Exception):
-                self._overlay_container.remove()
-            self._overlay_container = None
-            self._overlay_list = None
-            self._overlay_select_action = None
-        # Build items without IDs (some values contain slashes or spaces). Store original value.
-        li_items: list[ListItem] = []
-        for it in items:
-            li = ListItem(Label(it))
-            li._value = it
-            li_items.append(li)
-        list_view = ListView(*li_items)
-        with contextlib.suppress(Exception):
-            list_view.wrap = True
-        list_view.can_focus = True
-        with contextlib.suppress(Exception):
-            list_view.wrap = True  # type: ignore[attr-defined]
-        container = Vertical(Label(title), list_view)
-        self.mount(container)
-        # Ensure keyboard focus is on the overlay list (not hidden widgets)
-        self.set_focus(list_view)
-        # Ensure a valid starting selection for keyboard navigation
-        with contextlib.suppress(Exception):
-            if list_view.children:
-                list_view.index = 0
-        # Store overlay context; selection will be handled in on_list_view_selected
-        self._overlay_container = container
-        self._overlay_list = list_view
-        self._overlay_select_action = select_action
+        self._menu_manager.show_list(title, items, select_action)
 
     def _table_has_focus(self) -> bool:
         """Return True if the inner DataTable currently has keyboard focus."""
@@ -762,40 +711,7 @@ class PRTrackApp(App):
             title: Menu title.
             actions: List of (key, label) tuples used to build the list.
         """
-        self._menu.display = False
-        self._table.display = False
-        # Build items without IDs; keep the action key on the item
-        # Replace existing overlay container if present (avoid stacking)
-        if self._overlay_container is not None:
-            with contextlib.suppress(Exception):
-                self._overlay_container.remove()
-            self._overlay_container = None
-            self._overlay_list = None
-            self._overlay_select_action = None
-        li_actions: list[ListItem] = []
-        for key, lbl in actions:
-            li = ListItem(Label(lbl))
-            li._value = key
-            li_actions.append(li)
-        list_view = ListView(*li_actions)
-        with contextlib.suppress(Exception):
-            list_view.wrap = True
-        list_view.can_focus = True
-        with contextlib.suppress(Exception):
-            list_view.wrap = True  # type: ignore[attr-defined]
-        container = Vertical(Label(title), list_view)
-        self.mount(container)
-        # Ensure keyboard focus is on the overlay list
-        self.set_focus(list_view)
-        # Ensure a valid starting selection for keyboard navigation
-        with contextlib.suppress(Exception):
-            if list_view.children:
-                list_view.index = 0
-        # Use overlay selection context; selection handled in on_list_view_selected
-        self._overlay_container = container
-        self._overlay_list = list_view
-        # Wrap to route to config action handler
-        self._overlay_select_action = lambda key: self._handle_config_action(key)
+        self._menu_manager.show_choice_menu(title, actions)
 
     # ---------- Markdown selection & export ----------
 
@@ -842,15 +758,7 @@ class PRTrackApp(App):
                 self._show_menu()
 
     def _update_markdown_status(self) -> None:
-        scope = self._current_scope_key()
-        count = len(self._md_selected)
-        base = "Selecting for Markdown"
-        mk = self._keymap.get("mark_markdown", "m")
-        bk = self._keymap.get("back", "backspace")
-        # Keep line length under 100 chars
-        msg = f"{base} • Selected: {count} • Scope: {scope} • Keys: " f"mark='{mk}', back='{bk}', accept='enter'"
-        self._status.update(msg)
-        self._status.display = True
+        self._status_manager.update_markdown_status()
 
     def _enter_md_mode(self, kind: str, value: str | None) -> None:
         self._md_mode = True
@@ -1262,12 +1170,7 @@ class PRTrackApp(App):
             placeholder: Placeholder text for the input field.
             cb: Callback invoked with the input string upon confirmation.
         """
-        # Remove existing prompt containers if any to ensure unique IDs
-        self._remove_all_prompts()
-        container = Vertical(Label(title), Input(placeholder=placeholder), Horizontal(Button("OK"), Button("Cancel")))
-        container.id = "prompt_one"
-        container.data_cb = cb  # type: ignore[attr-defined]
-        self.mount(container)
+        self._prompt_manager.prompt_one_field(title, placeholder, cb)
 
     def _prompt_set_staleness_threshold(self) -> None:
         """Prompt for staleness threshold in seconds."""
@@ -1349,29 +1252,11 @@ class PRTrackApp(App):
             ph2: Placeholder for the second input field.
             cb: Callback invoked with both input strings upon confirmation.
         """
-        # Remove existing prompt containers if any to ensure unique IDs
-        for pid in ("prompt_one", "prompt_two"):
-            with contextlib.suppress(Exception):
-                self.query_one(f"#{pid}").remove()
-        container = Vertical(
-            Label(title),
-            Input(placeholder=ph1, id="f1"),
-            Input(placeholder=ph2, id="f2"),
-            Horizontal(Button("OK"), Button("Cancel")),
-        )
-        container.id = "prompt_two"
-        container.data_cb = cb  # type: ignore[attr-defined]
-        self.mount(container)
+        self._prompt_manager.prompt_two_fields(title, ph1, ph2, cb)
 
     def _remove_all_prompts(self) -> None:
         """Remove all prompt overlays (one and two-field) if present."""
-        try:
-            for pid in ("prompt_one", "prompt_two"):
-                for node in list(self.query(f"#{pid}")):
-                    with contextlib.suppress(Exception):
-                        node.remove()
-        except Exception:
-            pass
+        self._overlay_manager.remove_all_prompts()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:  # Textual event handler
         """Handle OK/Cancel button presses for prompt overlays.
@@ -1403,17 +1288,7 @@ class PRTrackApp(App):
         Returns:
             True if an overlay was closed and navigation occurred; False otherwise.
         """
-        if self._overlay_container is None:
-            return False
-        with contextlib.suppress(Exception):
-            self._overlay_container.remove()
-        self._overlay_container = None
-        self._overlay_list = None
-        self._overlay_select_action = None
-        self._md_mode = False
-        self._md_scope = None
-        self._navigate_back_or_home()
-        return True
+        return self._overlay_manager.close_overlay_if_open()
 
     def _handle_markdown_back_if_needed(self) -> bool:
         """Handle back navigation when in markdown selection context.
@@ -1599,12 +1474,7 @@ class PRTrackApp(App):
             label: Button label (OK/Cancel).
             cb: Callback to invoke with the entered value.
         """
-        value = container.query_one(Input).value  # type: ignore[arg-type]
-        container.remove()
-        if label == "OK":
-            cb(value)
-        else:
-            self._navigate_back_or_home()
+        self._prompt_manager.handle_prompt_one(container, label, cb)
 
     def _handle_prompt_two(self, container, label: str, cb: Callable[[str, str], None]) -> None:
         """Process a two-field prompt OK/Cancel action.
@@ -1614,10 +1484,4 @@ class PRTrackApp(App):
             label: Button label (OK/Cancel).
             cb: Callback to invoke with the two entered values.
         """
-        v1 = container.query_one("#f1", Input).value  # type: ignore[arg-type]
-        v2 = container.query_one("#f2", Input).value  # type: ignore[arg-type]
-        container.remove()
-        if label == "OK":
-            cb(v1, v2)
-        else:
-            self._navigate_back_or_home()
+        self._prompt_manager.handle_prompt_two(container, label, cb)
