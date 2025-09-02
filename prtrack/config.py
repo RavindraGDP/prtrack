@@ -21,6 +21,8 @@ class AppConfig:
     auth_token: str | None = None
     global_users: list[str] = field(default_factory=list)
     repositories: list[RepoConfig] = field(default_factory=list)
+    staleness_threshold_seconds: int = 300  # 5 minutes default
+    pr_page_size: int = 10  # PRs per page for pagination
 
     @staticmethod
     def from_dict(data: dict[str, Any]) -> AppConfig:
@@ -40,6 +42,8 @@ class AppConfig:
             auth_token=data.get("auth_token"),
             global_users=list(data.get("global_users", []) or []),
             repositories=repos,
+            staleness_threshold_seconds=data.get("staleness_threshold_seconds", 300),
+            pr_page_size=int(data.get("pr_page_size", 10)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -55,6 +59,8 @@ class AppConfig:
                 {"name": r.name, **({"users": r.users} if r.users else {})}
                 for r in self.repositories
             ],
+            "staleness_threshold_seconds": self.staleness_threshold_seconds,
+            "pr_page_size": int(self.pr_page_size),
         }
 
 

@@ -27,7 +27,12 @@ from textual.widgets import (
 
 from . import storage
 from .config import AppConfig, RepoConfig, load_config, save_config
-from .github import GitHubClient, PullRequest, filter_prs
+from .github import GITHUB_API, GitHubClient, PullRequest, filter_prs
+
+# Time conversion constants
+SECONDS_PER_MINUTE = 60
+SECONDS_PER_HOUR = 3600
+SECONDS_PER_DAY = 86400
 
 
 @dataclass
@@ -56,6 +61,16 @@ class PRTable(Static):
 
             Args:
                 pr: The `PullRequest` selected by the user.
+            """
+            self.pr = pr
+            super().__init__()
+
+    class PRRefreshRequested(Message):
+        def __init__(self, pr: PullRequest) -> None:
+            """Message indicating that a PR should be refreshed.
+
+            Args:
+                pr: The `PullRequest` to refresh.
             """
             self.pr = pr
             super().__init__()
@@ -151,6 +166,19 @@ class PRTable(Static):
         if isinstance(pr, PullRequest):
             self.post_message(self.OpenRequested(pr))
 
+    def action_refresh_pr(self) -> None:
+        """Refresh the currently selected PR."""
+        # Get the currently selected row
+        cursor_row = self.table.cursor_row
+        if cursor_row < 0:
+            return
+
+        # Get the PR from the row key
+        pr = self.table.get_row_at(cursor_row)[0]  # Get the PR object from the first column
+        if isinstance(pr, PullRequest):
+            # Post a message to the parent app to refresh this PR
+            self.post_message(PRTable.PRRefreshRequested(pr))
+
 
 class PRTrackApp(App):
     """Textual TUI application for tracking GitHub pull requests."""
@@ -163,6 +191,8 @@ class PRTrackApp(App):
         Binding("q", "quit", "Quit"),
         Binding("escape", "go_home", "Home"),
         Binding("r", "refresh_current", "Refresh"),
+        Binding("]", "next_page", "Next Page"),
+        Binding("[", "prev_page", "Prev Page"),
     ]
 
     screen_mode = reactive("menu")
@@ -176,12 +206,22 @@ class PRTrackApp(App):
         self.cfg: AppConfig = load_config()
         self.client = GitHubClient(self.cfg.auth_token)
         self._menu = ListView(*[ListItem(Label(mi.label), id=mi.key) for mi in MAIN_MENU])
+        # Prefer native wrap if the Textual version supports it
+        with contextlib.suppress(Exception):
+            self._menu.wrap = True
+        with contextlib.suppress(Exception):
+            # Enable circular navigation if supported by Textual version
+            self._menu.wrap = True  # type: ignore[attr-defined]
         self._table = PRTable("Pull Requests")
         self._status = Label("", id="status")
         # Refresh state
         self._current_scope: tuple[str, str | None] = ("menu", None)  # (kind, value)
-        self._stale_after_seconds: int = 300
+        self._stale_after_seconds: int = self.cfg.staleness_threshold_seconds
         self._refresh_task: asyncio.Task | None = None
+        # Pagination state
+        self._page_size: int = int(getattr(self.cfg, "pr_page_size", 10) or 10)
+        self._page: int = 1
+        self._current_prs: list[PullRequest] = []
         # Overlay selection context (for repo/account lists, config lists, etc.)
         self._overlay_container: Vertical | None = None
         self._overlay_list: ListView | None = None
@@ -209,6 +249,10 @@ class PRTrackApp(App):
             self._overlay_container = None
             self._overlay_list = None
             self._overlay_select_action = None
+        # Ensure any prompt overlays are removed to avoid duplicate IDs
+        for pid in ("prompt_one", "prompt_two"):
+            with contextlib.suppress(Exception):
+                self.query_one(f"#{pid}").remove()
         self._show_menu()
 
     def _show_menu(self) -> None:
@@ -306,6 +350,37 @@ class PRTrackApp(App):
         prs = await self._load_all_prs()
         return filter_prs(prs, {account})
 
+    async def _load_single_pr(self, owner: str, repo: str, pr_number: int) -> PullRequest | None:
+        """Fetch a single PR from GitHub.
+
+        Args:
+            owner: Repository owner/org login.
+            repo: Repository name.
+            pr_number: Pull request number.
+
+        Returns:
+            A `PullRequest` object or None if not found.
+        """
+        try:
+            data = await self.client._get(f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}")
+            pr = PullRequest(
+                repo=f"{owner}/{repo}",
+                number=data["number"],
+                title=data["title"],
+                author=data["user"]["login"],
+                assignees=[a["login"] for a in data.get("assignees", [])],
+                branch=data["head"]["ref"],
+                draft=bool(data.get("draft", False)),
+                approvals=0,  # Will be filled below
+                html_url=data["html_url"],
+            )
+            # Fetch approvals
+            approvals = await self.client._count_approvals(owner, repo, pr.number)
+            pr.approvals = approvals
+            return pr
+        except Exception:
+            return None
+
     async def _show_prs(self, loader) -> None:
         """Execute a loader coroutine and display results in the table.
 
@@ -321,6 +396,26 @@ class PRTrackApp(App):
 
     # ---------------- Cache-first helpers ----------------
 
+    def _format_time_ago(self, seconds: int) -> str:
+        """Convert seconds to a human-readable time ago string.
+
+        Args:
+            seconds: Number of seconds ago.
+
+        Returns:
+            Human-readable time string.
+        """
+        if seconds < SECONDS_PER_MINUTE:
+            return f"{seconds}s ago"
+        if seconds < SECONDS_PER_HOUR:
+            minutes = seconds // SECONDS_PER_MINUTE
+            return f"{minutes}m ago"
+        if seconds < SECONDS_PER_DAY:
+            hours = seconds // SECONDS_PER_HOUR
+            return f"{hours}h ago"
+        days = seconds // SECONDS_PER_DAY
+        return f"{days}d ago"
+
     def _update_status_label(self, scope: str, refreshing: bool) -> None:
         """Update status label with last refreshed info and refreshing indicator.
 
@@ -332,12 +427,40 @@ class PRTrackApp(App):
         if last is None:
             text = "Last refresh: never"
         else:
-            ago = int(time.time()) - int(last)
-            text = f"Last refresh: {ago}s ago"
+            ago = max(0, int(time.time()) - int(last))
+            text = f"Last refresh: {self._format_time_ago(ago)}"
         if refreshing:
             text += " • Refreshing…"
+        # Append pagination info when applicable
+        total = len(self._current_prs)
+        if total:
+            pages = max(1, (total + self._page_size - 1) // self._page_size)
+            text += f" • Page {self._page}/{pages} ({total} PRs)"
         self._status.update(text)
         self._status.display = True
+
+    def _render_current_page(self) -> None:
+        """Render the current page from `_current_prs` into the table."""
+        total = len(self._current_prs)
+        if total == 0:
+            self._table.set_prs([])
+            return
+        pages = max(1, (total + self._page_size - 1) // self._page_size)
+        self._page = max(1, min(self._page, pages))
+        start = (self._page - 1) * self._page_size
+        end = start + self._page_size
+        self._table.set_prs(self._current_prs[start:end])
+
+    def _current_scope_key(self) -> str:
+        """Return the current scope key used for refresh metadata."""
+        kind, value = self._current_scope
+        if kind == "all":
+            return "all"
+        if kind == "repo" and value:
+            return f"repo:{value}"
+        if kind == "account" and value:
+            return f"account:{value}"
+        return "menu"
 
     def _show_cached_all(self) -> None:
         """Display cached PRs for 'all' scope, applying config filters, and maybe refresh."""
@@ -353,7 +476,9 @@ class PRTrackApp(App):
             all_prs.extend(repo_prs)
         # Sort newest first
         all_prs.sort(key=lambda p: p.number, reverse=True)
-        self._table.set_prs(all_prs)
+        self._current_prs = all_prs
+        self._page = 1
+        self._render_current_page()
         self._menu.display = False
         self._table.display = True
         scope = "all"
@@ -366,7 +491,9 @@ class PRTrackApp(App):
         """Display cached PRs for a repository and schedule refresh if stale."""
         self._current_scope = ("repo", repo_name)
         cached = storage.get_cached_prs_by_repo(repo_name)
-        self._table.set_prs(cached)
+        self._current_prs = cached
+        self._page = 1
+        self._render_current_page()
         self._menu.display = False
         self._table.display = True
         scope = f"repo:{repo_name}"
@@ -379,7 +506,9 @@ class PRTrackApp(App):
         """Display cached PRs for an account and schedule refresh if stale."""
         self._current_scope = ("account", account)
         cached = storage.get_cached_prs_by_account(account)
-        self._table.set_prs(cached)
+        self._current_prs = cached
+        self._page = 1
+        self._render_current_page()
         self._menu.display = False
         self._table.display = True
         scope = f"account:{account}"
@@ -402,6 +531,19 @@ class PRTrackApp(App):
             return True
         return (int(time.time()) - int(last)) > self._stale_after_seconds
 
+    def _refresh_table_with_updated_pr(self, updated_pr: PullRequest) -> None:
+        """Refresh the table with the updated PR data."""
+        # Get current PRs from the table
+        # For now, we'll just refresh the entire table
+        # In a more sophisticated implementation, we could update just the specific row
+        kind, value = self._current_scope
+        if kind == "all":
+            self._show_cached_all()
+        elif kind == "repo" and value:
+            self._show_cached_repo(value)
+        elif kind == "account" and value:
+            self._show_cached_account(value)
+
     # ---------------- Background refresh scheduling ----------------
     def _cancel_existing_refresh(self) -> None:
         """Cancel any in-flight background refresh task safely."""
@@ -419,8 +561,18 @@ class PRTrackApp(App):
             prs = await self._load_all_prs()
             storage.upsert_prs(prs)
             storage.record_last_refresh(scope)
-            # Apply current filters (if any global/per-repo)
-            self._table.set_prs(storage.get_cached_all_prs())
+            # Re-aggregate to apply current filters and pagination
+            all_prs: list[PullRequest] = []
+            global_users = set(self.cfg.global_users)
+            for rc in self.cfg.repositories:
+                repo_prs = storage.get_cached_prs_by_repo(rc.name)
+                users = set(rc.users or []) or global_users
+                if users:
+                    repo_prs = filter_prs(repo_prs, users)
+                all_prs.extend(repo_prs)
+            all_prs.sort(key=lambda p: p.number, reverse=True)
+            self._current_prs = all_prs
+            self._render_current_page()
             self._update_status_label(scope, refreshing=False)
 
         self._refresh_task = asyncio.create_task(runner())
@@ -435,7 +587,8 @@ class PRTrackApp(App):
             prs = await self._load_prs_by_repo(repo_name)
             storage.upsert_prs(prs)
             storage.record_last_refresh(scope)
-            self._table.set_prs(storage.get_cached_prs_by_repo(repo_name))
+            self._current_prs = storage.get_cached_prs_by_repo(repo_name)
+            self._render_current_page()
             self._update_status_label(scope, refreshing=False)
 
         self._refresh_task = asyncio.create_task(runner())
@@ -450,10 +603,48 @@ class PRTrackApp(App):
             prs = await self._load_prs_by_account(account)
             storage.upsert_prs(prs)
             storage.record_last_refresh(scope)
-            self._table.set_prs(storage.get_cached_prs_by_account(account))
+            self._current_prs = storage.get_cached_prs_by_account(account)
+            self._render_current_page()
             self._update_status_label(scope, refreshing=False)
 
         self._refresh_task = asyncio.create_task(runner())
+
+    def _schedule_refresh_single_pr(self, pr: PullRequest) -> None:
+        """Schedule background refresh for a single PR."""
+        self._cancel_existing_refresh()
+        scope = f"pr:{pr.repo}/{pr.number}"
+        self._update_status_label(scope, refreshing=True)
+
+        async def runner() -> None:
+            # Parse repo owner and name
+            try:
+                owner, repo_name = pr.repo.split("/", 1)
+            except ValueError:
+                self._update_status_label(scope, refreshing=False)
+                return
+
+            # Load the specific PR
+            try:
+                # We need to create a new method to fetch a single PR
+                single_pr = await self._load_single_pr(owner, repo_name, pr.number)
+                if single_pr:
+                    # Update the PR in storage
+                    storage.upsert_prs([single_pr])
+                    # Update the table with the refreshed PR
+                    self._refresh_table_with_updated_pr(single_pr)
+                    # Show toast notification
+                    self._show_toast(f"PR {pr.repo}#{pr.number} refreshed")
+            except Exception:
+                pass  # Silently fail for now
+            finally:
+                self._update_status_label(scope, refreshing=False)
+
+        self._refresh_task = asyncio.create_task(runner())
+
+    def _show_toast(self, message: str) -> None:
+        """Show a toast notification for a short time."""
+        # Use Textual's built-in notification system
+        self.notify(message, title="PR Tracker", timeout=3)
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Handle item selection from either the main menu or overlays.
@@ -477,40 +668,128 @@ class PRTrackApp(App):
                 self._show_menu()
             return
 
-        # Otherwise, treat selection as from the main menu
-        item_id = event.item.id or ""
-        match item_id:
-            case "list_all_prs":
-                # Cache-first display then background refresh if stale
-                self._show_cached_all()
-            case "list_repos":
-                self._show_list(
-                    "Tracked Repos",
-                    [r.name for r in self.cfg.repositories],
-                    select_action=self._select_repo,
-                )
-            case "list_accounts":
-                accounts = sorted(
-                    set(self.cfg.global_users)
-                    | {u for r in self.cfg.repositories for u in (r.users or [])}
-                )
-                self._show_list("Tracked Accounts", accounts, select_action=self._select_account)
-            case "prs_per_repo":
-                self._show_list(
-                    "Repos",
-                    [r.name for r in self.cfg.repositories],
-                    select_action=self._load_repo_prs,
-                )
-            case "prs_per_account":
-                accounts = sorted(
-                    set(self.cfg.global_users)
-                    | {u for r in self.cfg.repositories for u in (r.users or [])}
-                )
-                self._show_list("Accounts", accounts, select_action=self._load_account_prs)
-            case "config":
-                self._show_config_menu()
-            case "exit":
-                self.exit()
+        # Main menu selection via Enter
+        if self._menu is not None and event.list_view is self._menu:
+            item_id = event.item.id or ""
+            match item_id:
+                case "list_all_prs":
+                    self._show_cached_all()
+                case "list_repos":
+                    self._show_list(
+                        "Tracked Repos",
+                        [r.name for r in self.cfg.repositories],
+                        select_action=self._select_repo,
+                    )
+                case "list_accounts":
+                    accounts = sorted(
+                        set(self.cfg.global_users)
+                        | {u for r in self.cfg.repositories for u in (r.users or [])}
+                    )
+                    self._show_list(
+                        "Tracked Accounts",
+                        accounts,
+                        select_action=self._select_account,
+                    )
+                case "prs_per_repo":
+                    self._show_list(
+                        "Repos",
+                        [r.name for r in self.cfg.repositories],
+                        select_action=self._load_repo_prs,
+                    )
+                case "prs_per_account":
+                    accounts = sorted(
+                        set(self.cfg.global_users)
+                        | {u for r in self.cfg.repositories for u in (r.users or [])}
+                    )
+                    self._show_list(
+                        "Accounts",
+                        accounts,
+                        select_action=self._load_account_prs,
+                    )
+                case "config":
+                    self._show_config_menu()
+                case "exit":
+                    self.exit()
+            return
+
+    # ---------- Pagination actions and wrap workaround ----------
+
+    def action_next_page(self) -> None:
+        if not self._current_prs:
+            return
+        total = len(self._current_prs)
+        pages = max(1, (total + self._page_size - 1) // self._page_size)
+        if self._page < pages:
+            self._page += 1
+        else:
+            self._page = 1
+        self._render_current_page()
+        scope = self._current_scope_key()
+        self._update_status_label(scope, refreshing=False)
+
+    def action_prev_page(self) -> None:
+        if not self._current_prs:
+            return
+        total = len(self._current_prs)
+        pages = max(1, (total + self._page_size - 1) // self._page_size)
+        if self._page > 1:
+            self._page -= 1
+        else:
+            self._page = pages
+        self._render_current_page()
+        scope = self._current_scope_key()
+        self._update_status_label(scope, refreshing=False)
+
+    def on_key(self, event) -> None:  # type: ignore[override]
+        """Workaround for ListView wrap: manually wrap selection on up/down keys."""
+        key = getattr(event, "key", None)
+        if key not in {"up", "down"}:
+            return
+        target = None
+        if self._overlay_list is not None and self._overlay_list.display:
+            target = self._overlay_list
+        elif self._menu is not None and self._menu.display:
+            target = self._menu
+        if target is None:
+            return
+        try:
+            count = len(target.children)
+            if count == 0:
+                return
+            idx = getattr(target, "index", 0)
+            wrapped = self._maybe_wrap_index(count, idx, key)
+            if wrapped is None:
+                # Not at a boundary; let Textual handle normal movement
+                return
+            target.index = wrapped
+            # Prevent default ListView key handling from running as well,
+            # which would otherwise move the selection one more step.
+            with contextlib.suppress(Exception):
+                event.prevent_default()
+            event.stop()
+        except Exception:
+            pass
+        return
+
+    @staticmethod
+    def _maybe_wrap_index(count: int, idx: int, key: str) -> int | None:
+        """Return wrapped index if at boundary for key, otherwise None.
+
+        Args:
+            count: Number of items.
+            idx: Current index.
+            key: 'up' or 'down'.
+
+        Returns:
+            New index if wrapping should occur; otherwise None.
+        """
+        if count <= 0:
+            return None
+        if key == "up" and idx == 0:
+            return count - 1
+        if key == "down" and idx == count - 1:
+            return 0
+        return None
 
     def _show_list(
         self, title: str, items: list[str], select_action: Callable[[str], None] | None = None
@@ -531,7 +810,11 @@ class PRTrackApp(App):
             li._value = it
             li_items.append(li)
         list_view = ListView(*li_items)
+        with contextlib.suppress(Exception):
+            list_view.wrap = True
         list_view.can_focus = True
+        with contextlib.suppress(Exception):
+            list_view.wrap = True  # type: ignore[attr-defined]
         container = Vertical(Label(title), list_view)
         self.mount(container)
         # Ensure keyboard focus is on the overlay list (not hidden widgets)
@@ -585,6 +868,14 @@ class PRTrackApp(App):
         """
         webbrowser.open(message.pr.html_url)
 
+    def on_pr_table_pr_refresh_requested(self, message: PRTable.PRRefreshRequested) -> None:
+        """Refresh the selected PR.
+
+        Args:
+            message: Message carrying the `PullRequest` to refresh.
+        """
+        self._schedule_refresh_single_pr(message.pr)
+
     # ---------------- Config menu ----------------
 
     def _show_config_menu(self) -> None:
@@ -594,6 +885,8 @@ class PRTrackApp(App):
             ("remove_repo", "Remove repo"),
             ("add_account", "Add account"),
             ("remove_account", "Remove account"),
+            ("set_stale", "Set staleness threshold (seconds)"),
+            ("set_page_size", "Set PRs per page"),
             ("update_token", "Update GitHub token"),
             ("show_config", "Show current config"),
             ("back", "Back"),
@@ -616,7 +909,11 @@ class PRTrackApp(App):
             li._value = key
             li_actions.append(li)
         list_view = ListView(*li_actions)
+        with contextlib.suppress(Exception):
+            list_view.wrap = True
         list_view.can_focus = True
+        with contextlib.suppress(Exception):
+            list_view.wrap = True  # type: ignore[attr-defined]
         container = Vertical(Label(title), list_view)
         self.mount(container)
         # Ensure keyboard focus is on the overlay list
@@ -645,7 +942,11 @@ class PRTrackApp(App):
             case "add_account":
                 self._prompt_add_account()
             case "remove_account":
-                self._prompt_remove_account()
+                self._prompt_remove_account_select()
+            case "set_stale":
+                self._prompt_set_staleness_threshold()
+            case "set_page_size":
+                self._prompt_set_pr_page_size()
             case "update_token":
                 self._prompt_update_token()
             case "show_config":
@@ -685,6 +986,9 @@ class PRTrackApp(App):
             repo_name: Repository in "owner/repo" format to remove.
         """
         self.cfg.repositories = [r for r in self.cfg.repositories if r.name != repo_name]
+        # Purge cached PRs for this repo immediately
+        with contextlib.suppress(Exception):
+            storage.delete_prs_by_repo(repo_name)
         save_config(self.cfg)
         self._show_menu()
 
@@ -720,30 +1024,49 @@ class PRTrackApp(App):
         save_config(self.cfg)
         self._show_menu()
 
-    def _prompt_remove_account(self) -> None:
-        """Prompt to remove an account from global or per-repo tracked users."""
-        self._prompt_two_fields(
-            "Remove Account",
-            "username",
-            "repo (owner/repo or empty=global)",
-            self._do_remove_account,
+    def _prompt_remove_account_select(self) -> None:
+        """Show a list of accounts (global and per-repo) to remove via selection."""
+        items: list[str] = []
+        # Global users
+        for u in sorted(set(self.cfg.global_users)):
+            items.append(f"global:{u}")
+        # Per-repo users
+        for r in self.cfg.repositories:
+            for u in sorted(set(r.users or [])):
+                items.append(f"{r.name}:{u}")
+        if not items:
+            self._show_menu()
+            return
+        self._show_list(
+            "Remove Account - select",
+            items,
+            select_action=self._do_remove_account_select,
         )
 
-    def _do_remove_account(self, username: str, repo_name: str) -> None:
-        """Remove an account from global or per-repo tracked users.
+    def _do_remove_account_select(self, key: str) -> None:
+        """Handle selection of an account removal entry.
 
-        Args:
-            username: GitHub username to remove.
-            repo_name: "owner/repo" to scope removal, or empty for global.
+        Key format:
+          - "global:username" for global users
+          - "owner/repo:username" for repo-scoped users
         """
+        try:
+            prefix, username = key.split(":", 1)
+        except ValueError:
+            self._show_menu()
+            return
         username = username.strip()
-        repo_name = repo_name.strip()
-        if repo_name:
+        if prefix == "global":
+            self.cfg.global_users = [u for u in self.cfg.global_users if u != username]
+            with contextlib.suppress(Exception):
+                storage.delete_prs_by_account(username)
+        else:
+            repo_name = prefix
             for r in self.cfg.repositories:
                 if r.name == repo_name and r.users:
                     r.users = [u for u in r.users if u != username] or None
-        else:
-            self.cfg.global_users = [u for u in self.cfg.global_users if u != username]
+            with contextlib.suppress(Exception):
+                storage.delete_prs_by_account(username, repo_name)
         save_config(self.cfg)
         self._show_menu()
 
@@ -769,6 +1092,8 @@ class PRTrackApp(App):
         lines.append(f"Token: {'set' if self.cfg.auth_token else 'not set'}")
         users = ", ".join(self.cfg.global_users) if self.cfg.global_users else "(none)"
         lines.append(f"Global users: {users}")
+        lines.append(f"Staleness threshold (s): {self.cfg.staleness_threshold_seconds}")
+        lines.append(f"PRs per page: {getattr(self.cfg, 'pr_page_size', 10)}")
         for r in self.cfg.repositories:
             users = ", ".join(r.users) if r.users else "(inherit globals)"
             lines.append(f"Repo: {r.name} | users: {users}")
@@ -791,12 +1116,48 @@ class PRTrackApp(App):
             placeholder: Placeholder text for the input field.
             cb: Callback invoked with the input string upon confirmation.
         """
+        # Remove existing prompt containers if any to ensure unique IDs
+        for pid in ("prompt_one", "prompt_two"):
+            with contextlib.suppress(Exception):
+                self.query_one(f"#{pid}").remove()
         container = Vertical(
             Label(title), Input(placeholder=placeholder), Horizontal(Button("OK"), Button("Cancel"))
         )
         container.id = "prompt_one"
         container.data_cb = cb  # type: ignore[attr-defined]
         self.mount(container)
+
+    def _prompt_set_staleness_threshold(self) -> None:
+        """Prompt for staleness threshold in seconds."""
+        self._prompt_one_field(
+            "Set staleness threshold (seconds)",
+            str(self.cfg.staleness_threshold_seconds),
+            self._do_set_staleness_threshold,
+        )
+
+    def _do_set_staleness_threshold(self, value: str) -> None:
+        with contextlib.suppress(Exception):
+            seconds = max(0, int(value.strip()))
+            self.cfg.staleness_threshold_seconds = seconds
+            self._stale_after_seconds = seconds
+            save_config(self.cfg)
+        self._show_menu()
+
+    def _prompt_set_pr_page_size(self) -> None:
+        """Prompt for PRs per page size."""
+        self._prompt_one_field(
+            "Set PRs per page",
+            str(getattr(self.cfg, "pr_page_size", 10)),
+            self._do_set_pr_page_size,
+        )
+
+    def _do_set_pr_page_size(self, value: str) -> None:
+        with contextlib.suppress(Exception):
+            size = max(1, int(value.strip()))
+            self.cfg.pr_page_size = size  # type: ignore[attr-defined]
+            self._page_size = size
+            save_config(self.cfg)
+        self._show_menu()
 
     def _prompt_two_fields(self, title: str, ph1: str, ph2: str, cb) -> None:
         """Create a two-field input prompt overlay.
@@ -807,6 +1168,10 @@ class PRTrackApp(App):
             ph2: Placeholder for the second input field.
             cb: Callback invoked with both input strings upon confirmation.
         """
+        # Remove existing prompt containers if any to ensure unique IDs
+        for pid in ("prompt_one", "prompt_two"):
+            with contextlib.suppress(Exception):
+                self.query_one(f"#{pid}").remove()
         container = Vertical(
             Label(title),
             Input(placeholder=ph1, id="f1"),

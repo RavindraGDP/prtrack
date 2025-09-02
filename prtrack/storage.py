@@ -155,6 +155,56 @@ def get_cached_prs_by_account(account: str) -> list[PullRequest]:
         return result
 
 
+def delete_prs_by_repo(repo_name: str) -> None:
+    """Delete all cached PRs belonging to a repository.
+
+    Args:
+        repo_name: "owner/repo" identifier to remove from cache.
+    """
+    with _connect() as conn:
+        conn.execute("DELETE FROM prs WHERE repo = ?", (repo_name,))
+
+
+def delete_prs_by_account(account: str, repo_name: str | None = None) -> None:
+    """Delete cached PRs authored by or assigned to an account.
+
+    Args:
+        account: GitHub username to purge from cache.
+        repo_name: Optional "owner/repo" to limit the deletion to a repository.
+    """
+    with _connect() as conn:
+        if repo_name:
+            # Delete rows where author==account and repo matches
+            query = "DELETE FROM prs WHERE repo = ? AND author = ?"
+            conn.execute(query, (repo_name, account))
+            # For assignee membership, filter in Python due to JSON storage
+            query = "SELECT repo, number, assignees FROM prs WHERE repo = ?"
+            cur = conn.execute(query, (repo_name,))
+            rows = cur.fetchall()
+            for r in rows:
+                try:
+                    assignees = list(json.loads(r["assignees"]) or [])
+                except Exception:
+                    assignees = []
+                if account in assignees:
+                    query = "DELETE FROM prs WHERE repo = ? AND number = ?"
+                    conn.execute(query, (r["repo"], r["number"]))
+        else:
+            query = "DELETE FROM prs WHERE author = ?"
+            conn.execute(query, (account,))
+            query = "SELECT repo, number, assignees FROM prs"
+            cur = conn.execute(query)
+            rows = cur.fetchall()
+            for r in rows:
+                try:
+                    assignees = list(json.loads(r["assignees"]) or [])
+                except Exception:
+                    assignees = []
+                if account in assignees:
+                    query = "DELETE FROM prs WHERE repo = ? AND number = ?"
+                    conn.execute(query, (r["repo"], r["number"]))
+
+
 def _row_to_pr(row: sqlite3.Row) -> PullRequest:
     return PullRequest(
         repo=row["repo"],
