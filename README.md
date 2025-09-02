@@ -129,10 +129,6 @@ While using PR Tracker, you can navigate and interact with the application using
 
 ### Test Coverage
 
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
 To generate a coverage report:
 
 ```bash
