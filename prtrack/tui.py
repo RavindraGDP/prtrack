@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 import webbrowser
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from textual.widgets import (
     Static,
 )
 
+from . import storage
 from .config import AppConfig, RepoConfig, load_config, save_config
 from .github import GitHubClient, PullRequest, filter_prs
 
@@ -160,27 +162,37 @@ class PRTrackApp(App):
     BINDINGS: ClassVar[list[Binding]] = [
         Binding("q", "quit", "Quit"),
         Binding("escape", "go_home", "Home"),
+        Binding("r", "refresh_current", "Refresh"),
     ]
 
     screen_mode = reactive("menu")
 
     def __init__(self) -> None:
-        """Initialize application state and widgets."""
+        """Initialize application state and widgets.
+
+        Initializes configuration, API client, UI widgets, and cache/refresh state.
+        """
         super().__init__()
         self.cfg: AppConfig = load_config()
         self.client = GitHubClient(self.cfg.auth_token)
         self._menu = ListView(*[ListItem(Label(mi.label), id=mi.key) for mi in MAIN_MENU])
         self._table = PRTable("Pull Requests")
+        self._status = Label("", id="status")
+        # Refresh state
+        self._current_scope: tuple[str, str | None] = ("menu", None)  # (kind, value)
+        self._stale_after_seconds: int = 300
+        self._refresh_task: asyncio.Task | None = None
         # Overlay selection context (for repo/account lists, config lists, etc.)
         self._overlay_container: Vertical | None = None
         self._overlay_list: ListView | None = None
         self._overlay_select_action: Callable[[str], None] | None = None
 
     def compose(self) -> ComposeResult:
-        """Compose the main layout containing header, menu, table, and footer."""
+        """Compose the main layout containing header, menu, status, table, and footer."""
         yield Header(show_clock=False)
         with Vertical():
             yield self._menu
+            yield self._status
             yield self._table
         yield Footer()
 
@@ -204,19 +216,30 @@ class PRTrackApp(App):
         self.screen_mode = "menu"
         self._menu.display = True
         self._table.display = False
+        self._status.display = False
         self._menu.focus()
 
-    async def _load_all_prs(self) -> list[PullRequest]:
-        """Load and aggregate open PRs from all configured repositories.
+    def action_refresh_current(self) -> None:
+        """Refresh the data for the current view.
 
-        Uses concurrency across repositories to reduce total wait time.
+        Depending on the active scope (all, repo, or account), schedule a background
+        refresh and update the status indicator. No-op on the menu screen.
+        """
+        kind, value = self._current_scope
+        if kind == "all":
+            self._schedule_refresh_all()
+        elif kind == "repo" and value:
+            self._schedule_refresh_repo(value)
+        elif kind == "account" and value:
+            self._schedule_refresh_account(value)
+
+    async def _load_all_prs(self) -> list[PullRequest]:
+        """Fetch open PRs from all configured repositories from GitHub.
+
+        This is a network call; prefer using cache-first helpers for UI flows.
 
         Returns:
             List of `PullRequest` objects sorted by descending PR number.
-
-        Raises:
-            httpx.HTTPStatusError: If GitHub API responds with an error.
-            httpx.RequestError: On network or timeout errors.
         """
         all_prs: list[PullRequest] = []
         global_users = set(self.cfg.global_users)
@@ -250,7 +273,7 @@ class PRTrackApp(App):
         return all_prs
 
     async def _load_prs_by_repo(self, repo_name: str) -> list[PullRequest]:
-        """Load open PRs for a single repository, applying user filters.
+        """Fetch open PRs for a single repository from GitHub, applying user filters.
 
         Args:
             repo_name: The repository in "owner/repo" format.
@@ -272,7 +295,7 @@ class PRTrackApp(App):
         return prs
 
     async def _load_prs_by_account(self, account: str) -> list[PullRequest]:
-        """Load open PRs authored by or assigned to a given account.
+        """Fetch open PRs authored by or assigned to a given account from GitHub.
 
         Args:
             account: GitHub username to filter by.
@@ -283,9 +306,7 @@ class PRTrackApp(App):
         prs = await self._load_all_prs()
         return filter_prs(prs, {account})
 
-    async def _show_prs(
-        self, loader
-    ) -> None:  # loader is an async function returning list[PullRequest]
+    async def _show_prs(self, loader) -> None:
         """Execute a loader coroutine and display results in the table.
 
         Args:
@@ -295,7 +316,144 @@ class PRTrackApp(App):
         self._table.set_prs(prs)
         self._menu.display = False
         self._table.display = True
+        self._status.display = True
         self._table.focus()
+
+    # ---------------- Cache-first helpers ----------------
+
+    def _update_status_label(self, scope: str, refreshing: bool) -> None:
+        """Update status label with last refreshed info and refreshing indicator.
+
+        Args:
+            scope: Scope key as used for refresh records.
+            refreshing: Whether a background refresh is running.
+        """
+        last = storage.get_last_refresh(scope)
+        if last is None:
+            text = "Last refresh: never"
+        else:
+            ago = int(time.time()) - int(last)
+            text = f"Last refresh: {ago}s ago"
+        if refreshing:
+            text += " • Refreshing…"
+        self._status.update(text)
+        self._status.display = True
+
+    def _show_cached_all(self) -> None:
+        """Display cached PRs for 'all' scope, applying config filters, and maybe refresh."""
+        self._current_scope = ("all", None)
+        # Aggregate per-repo from cache to apply per-repo/global filters
+        all_prs: list[PullRequest] = []
+        global_users = set(self.cfg.global_users)
+        for rc in self.cfg.repositories:
+            repo_prs = storage.get_cached_prs_by_repo(rc.name)
+            users = set(rc.users or []) or global_users
+            if users:
+                repo_prs = filter_prs(repo_prs, users)
+            all_prs.extend(repo_prs)
+        # Sort newest first
+        all_prs.sort(key=lambda p: p.number, reverse=True)
+        self._table.set_prs(all_prs)
+        self._menu.display = False
+        self._table.display = True
+        scope = "all"
+        should_refresh = self._is_stale(scope)
+        self._update_status_label(scope, refreshing=should_refresh)
+        if should_refresh:
+            self._schedule_refresh_all()
+
+    def _show_cached_repo(self, repo_name: str) -> None:
+        """Display cached PRs for a repository and schedule refresh if stale."""
+        self._current_scope = ("repo", repo_name)
+        cached = storage.get_cached_prs_by_repo(repo_name)
+        self._table.set_prs(cached)
+        self._menu.display = False
+        self._table.display = True
+        scope = f"repo:{repo_name}"
+        should_refresh = self._is_stale(scope)
+        self._update_status_label(scope, refreshing=should_refresh)
+        if should_refresh:
+            self._schedule_refresh_repo(repo_name)
+
+    def _show_cached_account(self, account: str) -> None:
+        """Display cached PRs for an account and schedule refresh if stale."""
+        self._current_scope = ("account", account)
+        cached = storage.get_cached_prs_by_account(account)
+        self._table.set_prs(cached)
+        self._menu.display = False
+        self._table.display = True
+        scope = f"account:{account}"
+        should_refresh = self._is_stale(scope)
+        self._update_status_label(scope, refreshing=should_refresh)
+        if should_refresh:
+            self._schedule_refresh_account(account)
+
+    def _is_stale(self, scope: str) -> bool:
+        """Check if data is stale based on configured threshold.
+
+        Args:
+            scope: Scope key for last refresh lookup.
+
+        Returns:
+            True if no refresh timestamp or older than threshold.
+        """
+        last = storage.get_last_refresh(scope)
+        if last is None:
+            return True
+        return (int(time.time()) - int(last)) > self._stale_after_seconds
+
+    # ---------------- Background refresh scheduling ----------------
+    def _cancel_existing_refresh(self) -> None:
+        """Cancel any in-flight background refresh task safely."""
+        if self._refresh_task and not self._refresh_task.done():
+            self._refresh_task.cancel()
+        self._refresh_task = None
+
+    def _schedule_refresh_all(self) -> None:
+        """Schedule background refresh for all repositories."""
+        self._cancel_existing_refresh()
+        scope = "all"
+        self._update_status_label(scope, refreshing=True)
+
+        async def runner() -> None:
+            prs = await self._load_all_prs()
+            storage.upsert_prs(prs)
+            storage.record_last_refresh(scope)
+            # Apply current filters (if any global/per-repo)
+            self._table.set_prs(storage.get_cached_all_prs())
+            self._update_status_label(scope, refreshing=False)
+
+        self._refresh_task = asyncio.create_task(runner())
+
+    def _schedule_refresh_repo(self, repo_name: str) -> None:
+        """Schedule background refresh for a repository."""
+        self._cancel_existing_refresh()
+        scope = f"repo:{repo_name}"
+        self._update_status_label(scope, refreshing=True)
+
+        async def runner() -> None:
+            prs = await self._load_prs_by_repo(repo_name)
+            storage.upsert_prs(prs)
+            storage.record_last_refresh(scope)
+            self._table.set_prs(storage.get_cached_prs_by_repo(repo_name))
+            self._update_status_label(scope, refreshing=False)
+
+        self._refresh_task = asyncio.create_task(runner())
+
+    def _schedule_refresh_account(self, account: str) -> None:
+        """Schedule background refresh for an account."""
+        self._cancel_existing_refresh()
+        scope = f"account:{account}"
+        self._update_status_label(scope, refreshing=True)
+
+        async def runner() -> None:
+            prs = await self._load_prs_by_account(account)
+            storage.upsert_prs(prs)
+            storage.record_last_refresh(scope)
+            self._table.set_prs(storage.get_cached_prs_by_account(account))
+            self._update_status_label(scope, refreshing=False)
+
+        self._refresh_task = asyncio.create_task(runner())
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Handle item selection from either the main menu or overlays.
@@ -323,9 +481,8 @@ class PRTrackApp(App):
         item_id = event.item.id or ""
         match item_id:
             case "list_all_prs":
-                self.call_after_refresh(
-                    lambda: asyncio.create_task(self._show_prs(self._load_all_prs))
-                )
+                # Cache-first display then background refresh if stale
+                self._show_cached_all()
             case "list_repos":
                 self._show_list(
                     "Tracked Repos",
@@ -410,11 +567,7 @@ class PRTrackApp(App):
         Args:
             repo_name: Repository in "owner/repo" format.
         """
-
-        async def loader():
-            return await self._load_prs_by_repo(repo_name)
-
-        self.call_after_refresh(lambda: asyncio.create_task(self._show_prs(loader)))
+        self._show_cached_repo(repo_name)
 
     def _load_account_prs(self, account: str) -> None:
         """Trigger loading and displaying PRs for the selected account.
@@ -422,11 +575,7 @@ class PRTrackApp(App):
         Args:
             account: GitHub username.
         """
-
-        async def loader():
-            return await self._load_prs_by_account(account)
-
-        self.call_after_refresh(lambda: asyncio.create_task(self._show_prs(loader)))
+        self._show_cached_account(account)
 
     def on_pr_table_open_requested(self, message: PRTable.OpenRequested) -> None:
         """Open the selected PR in the default web browser.
