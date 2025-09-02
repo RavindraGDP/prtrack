@@ -4,18 +4,16 @@ import asyncio
 import contextlib
 import time
 import webbrowser
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import ClassVar
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import (
     Button,
-    DataTable,
     Footer,
     Header,
     Input,
@@ -28,15 +26,14 @@ from textual.widgets import (
 from . import storage
 from .config import AppConfig, RepoConfig, load_config, save_config
 from .github import GITHUB_API, GitHubClient, PullRequest, filter_prs
-
-# Time conversion constants
-SECONDS_PER_MINUTE = 60
-SECONDS_PER_HOUR = 3600
-SECONDS_PER_DAY = 86400
+from .ui import PRTable
+from .utils.time import format_time_ago
 
 
 @dataclass
 class MenuItem:
+    """Menu item dataclass."""
+
     key: str
     label: str
 
@@ -50,134 +47,6 @@ MAIN_MENU: list[MenuItem] = [
     MenuItem("config", "Adjust config"),
     MenuItem("exit", "Exit"),
 ]
-
-
-class PRTable(Static):
-    """Widget that renders a table of pull requests and emits open events."""
-
-    class OpenRequested(Message):
-        def __init__(self, pr: PullRequest) -> None:
-            """Message indicating that a PR should be opened in a browser.
-
-            Args:
-                pr: The `PullRequest` selected by the user.
-            """
-            self.pr = pr
-            super().__init__()
-
-    class PRRefreshRequested(Message):
-        def __init__(self, pr: PullRequest) -> None:
-            """Message indicating that a PR should be refreshed.
-
-            Args:
-                pr: The `PullRequest` to refresh.
-            """
-            self.pr = pr
-            super().__init__()
-
-    def __init__(self, title: str) -> None:
-        """Initialize the table widget.
-
-        Args:
-            title: Title label displayed above the table.
-        """
-        super().__init__()
-        self.title = title
-        self.table = DataTable(cursor_type="row")
-
-    def compose(self) -> ComposeResult:
-        """Compose the child widgets for this component."""
-        yield Label(self.title, id="table-title")
-        yield self.table
-
-    def on_mount(self) -> None:
-        """Set up the table columns when the widget mounts.
-
-        Uses a suppress block to tolerate minor version differences.
-        """
-        # Initialize columns once on first mount
-        with contextlib.suppress(Exception):
-            self.table.add_columns(
-                "Repo",
-                "#",
-                "Title",
-                "Author",
-                "Assignees",
-                "Branch",
-                "Status",
-                "Approvals",
-            )
-
-    def set_prs(self, prs: Iterable[PullRequest]) -> None:
-        """Populate the table rows with pull request data.
-
-        Args:
-            prs: Iterable of `PullRequest` objects to render.
-        """
-        # Rebuild table to avoid version-specific clear semantics
-        with contextlib.suppress(Exception):
-            self.table.remove()
-        self.table = DataTable(cursor_type="row")
-        with contextlib.suppress(Exception):
-            self.mount(self.table)
-            self.table.add_columns(
-                "Repo",
-                "#",
-                "Title",
-                "Author",
-                "Assignees",
-                "Branch",
-                "Status",
-                "Approvals",
-            )
-        for pr in prs:
-            try:
-                self.table.add_row(
-                    pr.repo,
-                    str(pr.number),
-                    pr.title,
-                    pr.author,
-                    ", ".join(pr.assignees),
-                    pr.branch,
-                    "Draft" if pr.draft else "Ready",
-                    str(pr.approvals),
-                    key=pr,
-                )
-            except Exception:
-                # Fallback without key if API differs
-                self.table.add_row(
-                    pr.repo,
-                    str(pr.number),
-                    pr.title,
-                    pr.author,
-                    ", ".join(pr.assignees),
-                    pr.branch,
-                    "Draft" if pr.draft else "Ready",
-                    str(pr.approvals),
-                )
-
-    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        """Handle selection and emit an `OpenRequested` message.
-
-        Args:
-            event: Selection event from the internal `DataTable`.
-        """
-        pr = event.row_key
-        if isinstance(pr, PullRequest):
-            self.post_message(self.OpenRequested(pr))
-
-    def action_refresh_pr(self) -> None:
-        """Refresh the currently selected PR."""
-        # Get the currently selected row
-        cursor_row = self.table.cursor_row
-        if cursor_row < 0:
-            return
-
-        # Get the PR from the row key
-        pr = self.table.get_row_at(cursor_row)[0]  # Get the PR object from the first column
-        if isinstance(pr, PullRequest):
-            # Post a message to the parent app to refresh this PR
-            self.post_message(PRTable.PRRefreshRequested(pr))
 
 
 class PRTrackApp(App):
@@ -396,26 +265,6 @@ class PRTrackApp(App):
 
     # ---------------- Cache-first helpers ----------------
 
-    def _format_time_ago(self, seconds: int) -> str:
-        """Convert seconds to a human-readable time ago string.
-
-        Args:
-            seconds: Number of seconds ago.
-
-        Returns:
-            Human-readable time string.
-        """
-        if seconds < SECONDS_PER_MINUTE:
-            return f"{seconds}s ago"
-        if seconds < SECONDS_PER_HOUR:
-            minutes = seconds // SECONDS_PER_MINUTE
-            return f"{minutes}m ago"
-        if seconds < SECONDS_PER_DAY:
-            hours = seconds // SECONDS_PER_HOUR
-            return f"{hours}h ago"
-        days = seconds // SECONDS_PER_DAY
-        return f"{days}d ago"
-
     def _update_status_label(self, scope: str, refreshing: bool) -> None:
         """Update status label with last refreshed info and refreshing indicator.
 
@@ -428,7 +277,7 @@ class PRTrackApp(App):
             text = "Last refresh: never"
         else:
             ago = max(0, int(time.time()) - int(last))
-            text = f"Last refresh: {self._format_time_ago(ago)}"
+            text = f"Last refresh: {format_time_ago(ago)}"
         if refreshing:
             text += " • Refreshing…"
         # Append pagination info when applicable
