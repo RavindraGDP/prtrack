@@ -2,7 +2,7 @@
 
 PR Tracker is a terminal-based application for tracking GitHub pull requests across multiple repositories. Built with Python and Textual, it provides an intuitive text-based user interface to monitor PRs assigned to you or your team, with features like filtering, pagination, and real-time updates.
 
-![PR Tracker TUI](https://raw.githubusercontent.com/Textualize/textual/main/imgs/textual.png)  <!-- Replace with actual screenshot when available -->
+<img width="821" height="390" alt="PR Tracker UI" src="https://github.com/user-attachments/assets/6058a42c-ddeb-4e5e-9d6a-35a490e3397a" />
 
 ## Prerequisites
 
