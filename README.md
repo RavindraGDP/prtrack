@@ -21,26 +21,11 @@ cd prtrack
 
 # Install dependencies using uv
 uv sync
-```
 
-### Using pip
+# Install as uv tool
+uv tool install .
 
-```bash
-# Clone the repository
-git clone https://github.com/RavindraGDP/prtrack.git
-cd prtrack
-
-## Usage
-
-After installation, you can run PR Tracker using the following command:
-
-```bash
-uv run prtrack
-```
-
-Or if you installed with pip:
-
-```bash
+# use it anywhere
 prtrack
 ```
 
@@ -100,11 +85,6 @@ To set up PR Tracker for development:
 3. Run the application in development mode:
    ```bash
    uv run prtrack
-   ```
-
-4. For development, you can also run the application directly:
-   ```bash
-   python -m main
    ```
 
 ### Project Structure
@@ -173,12 +153,3 @@ coverage report
    - Add repositories you want to track
    - (Optional) Add GitHub personal access token for private repositories
    - (Optional) Add accounts to filter PRs by author or assignee
-
-# Create a virtual environment (optional but recommended)
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-```bash
-pip install .
-```
