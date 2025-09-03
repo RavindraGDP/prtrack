@@ -64,7 +64,7 @@ class NavigationManager:
             self.app._show_list(
                 "Repos",
                 [r.name for r in self.app.cfg.repositories],
-                select_action=self.app._md_select_repo,
+                select_action=self.app._markdown_manager.md_select_repo,
             )
             return True
         if self.app._navigation_stack and self.app._navigation_stack[-1] == "account_selection":
@@ -72,9 +72,9 @@ class NavigationManager:
             accounts = sorted(
                 set(self.app.cfg.global_users) | {u for r in self.app.cfg.repositories for u in (r.users or [])}
             )
-            self.app._show_list("Accounts", accounts, select_action=self.app._md_select_account)
+            self.app._show_list("Accounts", accounts, select_action=self.app._markdown_manager.md_select_account)
             return True
-        self.app._show_markdown_menu()
+        self.app._markdown_manager.show_markdown_menu()
         return True
 
     def navigate_back_or_home(self) -> None:
@@ -86,13 +86,13 @@ class NavigationManager:
             elif prev_screen == "main_menu":
                 self.app._show_menu()
             elif prev_screen == "markdown_menu":
-                self.app._show_markdown_menu()
+                self.app._markdown_manager.show_markdown_menu()
             elif prev_screen == "repo_selection":
                 # Go back to markdown menu when coming from repo selection
-                self.app._show_markdown_menu()
+                self.app._markdown_manager.show_markdown_menu()
             elif prev_screen == "account_selection":
                 # Go back to markdown menu when coming from account selection
-                self.app._show_markdown_menu()
+                self.app._markdown_manager.show_markdown_menu()
             else:
                 self.app._show_menu()
         else:

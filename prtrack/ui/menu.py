@@ -137,7 +137,7 @@ class MenuManager:
                 ),
                 self.app._load_account_prs,
             ),
-            "save_markdown": self.app._show_markdown_menu,
+            "save_markdown": self.app._markdown_manager.show_markdown_menu,
             "config": lambda: self.app._show_config_menu(is_from_main_menu=True),
             "exit": self.app.exit,
         }

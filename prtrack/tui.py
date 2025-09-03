@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
 import time
 import webbrowser
 from collections.abc import Callable
@@ -26,9 +25,9 @@ from . import storage
 from .config import AppConfig, RepoConfig, load_config
 from .config_manager import ConfigManager
 from .github import GITHUB_API, GitHubClient, PullRequest, filter_prs
+from .markdown_manager import MarkdownManager
 from .navigation import NavigationManager
 from .ui import MenuManager, OverlayManager, PromptManager, PRTable, StatusManager
-from .utils.markdown import write_prs_markdown
 
 
 @dataclass
@@ -127,6 +126,7 @@ class PRTrackApp(App):
         self._status_manager = StatusManager(self)
         self._navigation_manager = NavigationManager(self)
         self._config_manager = ConfigManager(self)
+        self._markdown_manager = MarkdownManager(self)
 
     def compose(self) -> ComposeResult:
         """Compose the main layout containing header, menu, status, table, and footer."""
@@ -171,7 +171,7 @@ class PRTrackApp(App):
         if not self._md_mode:
             return
         # Return to the markdown menu without clearing selection
-        self._show_markdown_menu()
+        self._markdown_manager.show_markdown_menu()
 
     def _show_menu(self) -> None:
         """Display the main menu and hide the table."""
@@ -682,141 +682,72 @@ class PRTrackApp(App):
     # ---------- Markdown selection & export ----------
 
     def _show_markdown_menu(self) -> None:
-        actions = [
-            ("md_by_repo", "Select PRs by Repo"),
-            ("md_by_account", "Select PRs by Account"),
-            ("md_review", f"Review Selection ({len(self._md_selected)})"),
-            ("md_save", "Save Selected to Markdown"),
-            ("back", "Back"),
-        ]
-        self._show_choice_menu("Save PRs to Markdown", actions)
-        # Rewire overlay handler to markdown actions
-        self._overlay_select_action = lambda key: self._handle_markdown_action(key)
+        """Display the markdown menu and handle markdown actions."""
+        self._markdown_manager.show_markdown_menu()
 
     def _handle_markdown_action(self, action: str) -> None:
-        match action:
-            case "md_by_repo":
-                # Push current screen to navigation stack before showing repo list
-                self._navigation_manager.push_screen("markdown_menu")
-                self._show_list(
-                    "Repos",
-                    [r.name for r in self.cfg.repositories],
-                    select_action=self._md_select_repo,
-                )
-            case "md_by_account":
-                # Push current screen to navigation stack before showing account list
-                self._navigation_manager.push_screen("markdown_menu")
-                accounts = sorted(
-                    set(self.cfg.global_users) | {u for r in self.cfg.repositories for u in (r.users or [])}
-                )
-                self._show_list(
-                    "Accounts",
-                    accounts,
-                    select_action=self._md_select_account,
-                )
-            case "md_review":
-                self._md_review_selection()
-            case "md_save":
-                self._prompt_save_markdown()
-            case "back":
-                self.action_go_back()
-            case _:
-                self._show_menu()
+        """Route a selected markdown action to its handler.
+
+        Args:
+            action: Action key from the markdown menu.
+        """
+        self._markdown_manager.handle_markdown_action(action)
 
     def _update_markdown_status(self) -> None:
         self._status_manager.update_markdown_status()
 
     def _enter_md_mode(self, kind: str, value: str | None) -> None:
-        self._md_mode = True
-        self._md_scope = (kind, value)
-        self._update_markdown_status()
+        """Enter markdown selection mode for a specific scope.
+
+        Args:
+            kind: The type of scope ("repo" or "account").
+            value: The specific repo or account name.
+        """
+        self._markdown_manager.enter_md_mode(kind, value)
 
     def _md_select_repo(self, repo_name: str) -> None:
-        # Push the repo selection screen to navigation stack so backspace works correctly
-        self._navigation_manager.push_screen("repo_selection")
-        self._show_cached_repo(repo_name)
-        self._enter_md_mode("repo", repo_name)
+        """Handle repo selection in markdown mode.
+
+        Args:
+            repo_name: Repository in "owner/repo" format.
+        """
+        self._markdown_manager.md_select_repo(repo_name)
 
     def _md_select_account(self, account: str) -> None:
-        # Push the account selection screen to navigation stack so backspace works correctly
-        self._navigation_manager.push_screen("account_selection")
-        self._show_cached_account(account)
-        self._enter_md_mode("account", account)
+        """Handle account selection in markdown mode.
+
+        Args:
+            account: GitHub username.
+        """
+        self._markdown_manager.md_select_account(account)
 
     def action_toggle_markdown_pr(self) -> None:
-        # Only allow marking when in markdown mode AND table is active and focused
-        if not (self._md_mode and self._table.display and self._overlay_container is None and self._table_has_focus()):
-            return
-        pr = self._table.get_selected_pr()
-        if not pr:
-            return
-        key = (pr.repo, pr.number)
-        if key in self._md_selected:
-            del self._md_selected[key]
-            self._show_toast(f"Unmarked {pr.repo}#{pr.number}")
-        else:
-            self._md_selected[key] = pr
-            self._show_toast(f"Marked {pr.repo}#{pr.number}")
-        self._update_markdown_status()
+        """Toggle PR selection in markdown mode."""
+        self._markdown_manager.toggle_markdown_pr()
 
     def _md_review_selection(self) -> None:
-        items = [f"{repo}#{num} - {pr.title}" for (repo, num), pr in self._md_selected.items()]
-        if not items:
-            self._show_toast("No PRs selected")
-            self._show_markdown_menu()
-            return
-        # Push current screen to navigation stack before showing review list
-        self._navigation_manager.push_screen("markdown_menu")
-        # Selecting an item will deselect it
-        self._show_list("Review Selection - select to remove", items, select_action=self._md_deselect)
+        """Review the current markdown selection."""
+        self._markdown_manager.md_review_selection()
 
     def _md_deselect(self, label: str) -> None:
-        # label format: "owner/repo#num - title"
-        try:
-            left = label.split(" - ", 1)[0]
-            repo, num_str = left.split("#", 1)
-            key = (repo, int(num_str))
-            if key in self._md_selected:
-                del self._md_selected[key]
-                self._show_toast(f"Removed {repo}#{num_str}")
-        except Exception:
-            pass
-        self._show_markdown_menu()
+        """Deselect a PR from the markdown selection.
+
+        Args:
+            label: Label of the PR to deselect in format "owner/repo#num - title".
+        """
+        self._markdown_manager.md_deselect(label)
 
     def _prompt_save_markdown(self) -> None:
-        if not self._md_selected:
-            self._show_toast("No PRs selected")
-            self._show_markdown_menu()
-            return
-        # Push current screen to navigation stack before showing prompt
-        self._navigation_manager.push_screen("markdown_menu")
-        default_path = os.path.join(os.getcwd(), "pr-track.md")
-        # Reuse one-field prompt
-        self._prompt_manager.prompt_one_field(
-            "Output markdown path (empty = CWD/pr-track.md)", default_path, self._do_save_markdown
-        )
+        """Prompt for markdown save path."""
+        self._markdown_manager.prompt_save_markdown()
 
     def _do_save_markdown(self, path: str) -> None:
-        outfile = path.strip() or os.path.join(os.getcwd(), "pr-track.md")
-        # Create parent dirs if needed
-        with contextlib.suppress(Exception):
-            os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
-        try:
-            count = len(self._md_selected)
-            write_prs_markdown(self._md_selected.values(), outfile)
-            self._show_toast(f"Saved {count} PR(s) to {outfile}")
-        except Exception:
-            self._show_toast("Failed to save markdown")
-        # Exit md mode back to menu but keep selection for convenience
-        self._md_mode = False
-        self._md_scope = None
-        # Check if we should return to markdown menu
-        if self._navigation_manager.peek_screen() == "markdown_menu":
-            # Remove the markdown_menu entry from stack and show markdown menu
-            self._navigation_manager.pop_screen()
-            self._show_markdown_menu()
-        else:
-            self._show_menu()
+        """Save selected PRs to a markdown file.
+
+        Args:
+            path: Path to save the markdown file.
+        """
+        self._markdown_manager.do_save_markdown(path)
 
     def _handle_config_action(self, action: str) -> None:
         """Route a selected config action to its handler.
@@ -919,7 +850,7 @@ class PRTrackApp(App):
                 sorted(set(self.cfg.global_users) | {u for r in self.cfg.repositories for u in (r.users or [])}),
                 self._load_account_prs,
             ),
-            "save_markdown": self._show_markdown_menu,
+            "save_markdown": self._markdown_manager.show_markdown_menu,
             "config": lambda: self._show_config_menu(is_from_main_menu=True),
             "exit": self.exit,
         }
