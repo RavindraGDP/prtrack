@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import ClassVar
@@ -24,6 +23,7 @@ from textual.widgets import (
 from . import storage
 from .config import AppConfig, RepoConfig, load_config
 from .config_manager import ConfigManager
+from .event_handler import EventHandler
 from .github import GITHUB_API, GitHubClient, PullRequest, filter_prs
 from .markdown_manager import MarkdownManager
 from .navigation import NavigationManager
@@ -127,6 +127,7 @@ class PRTrackApp(App):
         self._navigation_manager = NavigationManager(self)
         self._config_manager = ConfigManager(self)
         self._markdown_manager = MarkdownManager(self)
+        self._event_handler = EventHandler(self)
 
     def compose(self) -> ComposeResult:
         """Compose the main layout containing header, menu, status, table, and footer."""
@@ -529,19 +530,10 @@ class PRTrackApp(App):
         # Use Textual's built-in notification system
         self.notify(message, title="PR Tracker", timeout=3)
 
-    def on_list_view_selected(self, event: ListView.Selected) -> None:
-        """Handle item selection from either the main menu or overlays.
-
-        Args:
-            event: The selection event emitted by `ListView`.
-        """
-        if self._handle_overlay_selection_if_any(event):
-            return
-        self._handle_main_menu_selection_if_any(event)
-
     # ---------- Pagination actions and wrap workaround ----------
 
     def action_next_page(self) -> None:
+        """Move to the next page of PRs."""
         if not self._current_prs:
             return
         total = len(self._current_prs)
@@ -555,6 +547,7 @@ class PRTrackApp(App):
         self._update_status_label(scope, refreshing=False)
 
     def action_prev_page(self) -> None:
+        """Move to the previous page of PRs."""
         if not self._current_prs:
             return
         total = len(self._current_prs)
@@ -566,35 +559,6 @@ class PRTrackApp(App):
         self._render_current_page()
         scope = self._current_scope_key()
         self._update_status_label(scope, refreshing=False)
-
-    def on_key(self, event) -> None:  # type: ignore[override]
-        """Key handling: wrapping for lists and custom key mappings."""
-        key = getattr(event, "key", None)
-        if key is None:
-            return
-        if self._handle_custom_keymap(key, event):
-            return
-        self._handle_list_wrap_key(key, event)
-
-    @staticmethod
-    def _maybe_wrap_index(count: int, idx: int, key: str) -> int | None:
-        """Return wrapped index if at boundary for key, otherwise None.
-
-        Args:
-            count: Number of items.
-            idx: Current index.
-            key: 'up' or 'down'.
-
-        Returns:
-            New index if wrapping should occur; otherwise None.
-        """
-        if count <= 0:
-            return None
-        if key == "up" and idx == 0:
-            return count - 1
-        if key == "down" and idx == count - 1:
-            return 0
-        return None
 
     def _show_list(self, title: str, items: list[str], select_action=None) -> None:
         """Display a list overlay for selecting an item.
@@ -645,25 +609,6 @@ class PRTrackApp(App):
         """
         self._show_cached_account(account)
 
-    def on_pr_table_open_requested(self, message: PRTable.OpenRequested) -> None:
-        """Open the selected PR in the default web browser.
-
-        Args:
-            message: Message carrying the `PullRequest` to open.
-        """
-        # In markdown selection mode, ignore open on Enter
-        if self._md_mode:
-            return
-        webbrowser.open(message.pr.html_url)
-
-    def on_pr_table_pr_refresh_requested(self, message: PRTable.PRRefreshRequested) -> None:
-        """Refresh the selected PR.
-
-        Args:
-            message: Message carrying the `PullRequest` to refresh.
-        """
-        self._schedule_refresh_single_pr(message.pr)
-
     # ---------------- Config menu ----------------
 
     def _show_config_menu(self, is_from_main_menu: bool = False) -> None:
@@ -694,6 +639,7 @@ class PRTrackApp(App):
         self._markdown_manager.handle_markdown_action(action)
 
     def _update_markdown_status(self) -> None:
+        """Update the markdown status display."""
         self._status_manager.update_markdown_status()
 
     def _enter_md_mode(self, kind: str, value: str | None) -> None:
@@ -771,28 +717,6 @@ class PRTrackApp(App):
         """Remove all prompt overlays (one and two-field) if present."""
         self._overlay_manager.remove_all_prompts()
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:  # Textual event handler
-        """Handle OK/Cancel button presses for prompt overlays.
-
-        Args:
-            event: Button press event emitted by Textual.
-        """
-        label = event.button.label or ""
-        container = event.button.parent and event.button.parent.parent  # Horizontal -> Vertical
-        if not container:
-            return
-        if getattr(container, "id", None) not in {"prompt_one", "prompt_two"}:  # type: ignore[attr-defined]
-            return
-        cb = getattr(container, "data_cb", None)
-        if not cb:
-            return
-        if container.id == "prompt_one":  # type: ignore[union-attr]
-            self._handle_prompt_one(container, label, cb)
-            return
-        if container.id == "prompt_two":  # type: ignore[union-attr]
-            self._handle_prompt_two(container, label, cb)
-            return
-
     # ---------------- Small helpers extracted to reduce branching ----------------
 
     def _close_overlay_if_open(self) -> bool:
@@ -803,159 +727,24 @@ class PRTrackApp(App):
         """
         return self._overlay_manager.close_overlay_if_open()
 
-    def _handle_overlay_selection_if_any(self, event: ListView.Selected) -> bool:
-        """Handle overlay list selection if the event targets an overlay list.
+    # ---------------- Event handler delegation ----------------
 
-        Args:
-            event: The `ListView.Selected` event.
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        """Handle item selection from either the main menu or overlays."""
+        self._event_handler.on_list_view_selected(event)
 
-        Returns:
-            True if handled; False otherwise.
-        """
-        if self._overlay_list is None or event.list_view is not self._overlay_list:
-            return False
-        item_id = getattr(event.item, "_value", event.item.id or "")
-        if self._overlay_container:
-            self._overlay_container.remove()
-        cb = self._overlay_select_action
-        self._overlay_container = None
-        self._overlay_list = None
-        self._overlay_select_action = None
-        if cb:
-            cb(item_id)
-        else:
-            self._show_menu()
-        return True
+    def on_key(self, event) -> None:  # type: ignore[override]
+        """Key handling: wrapping for lists and custom key mappings."""
+        self._event_handler.on_key(event)
 
-    def _handle_main_menu_selection_if_any(self, event: ListView.Selected) -> None:
-        """Handle selection on the main menu list if present."""
-        if self._menu is None or event.list_view is not self._menu:
-            return
-        item_id = event.item.id or ""
-        actions: dict[str, Callable[[], None]] = {
-            "list_all_prs": self._show_cached_all,
-            "list_repos": lambda: self._show_list(
-                "Tracked Repos", [r.name for r in self.cfg.repositories], self._select_repo
-            ),
-            "list_accounts": lambda: self._show_list(
-                "Tracked Accounts",
-                sorted(set(self.cfg.global_users) | {u for r in self.cfg.repositories for u in (r.users or [])}),
-                self._select_account,
-            ),
-            "prs_per_repo": lambda: self._show_list(
-                "Repos", [r.name for r in self.cfg.repositories], self._load_repo_prs
-            ),
-            "prs_per_account": lambda: self._show_list(
-                "Accounts",
-                sorted(set(self.cfg.global_users) | {u for r in self.cfg.repositories for u in (r.users or [])}),
-                self._load_account_prs,
-            ),
-            "save_markdown": self._markdown_manager.show_markdown_menu,
-            "config": lambda: self._show_config_menu(is_from_main_menu=True),
-            "exit": self.exit,
-        }
-        actions.get(item_id, self._show_menu)()
+    def on_pr_table_open_requested(self, message: PRTable.OpenRequested) -> None:
+        """Open the selected PR in the default web browser."""
+        self._event_handler.on_pr_table_open_requested(message)
 
-    def _handle_custom_keymap(self, key: str, event) -> bool:
-        """Handle custom key mappings for the table and pagination.
+    def on_pr_table_pr_refresh_requested(self, message: PRTable.PRRefreshRequested) -> None:
+        """Refresh the selected PR."""
+        self._event_handler.on_pr_table_pr_refresh_requested(message)
 
-        Args:
-            key: The key string from the event.
-            event: The original Textual event (used to prevent default and stop).
-
-        Returns:
-            True if the event was handled; False to continue processing.
-        """
-        try:
-            table_active = (
-                self._table.display
-                and self._overlay_container is None
-                and not self._menu.display
-                and self._table_has_focus()
-            )
-            if self._md_mode and table_active and key == self._keymap.get("mark_markdown"):
-                self.action_toggle_markdown_pr()
-                with contextlib.suppress(Exception):
-                    event.prevent_default()
-                event.stop()
-                return True
-            if (not self._md_mode) and table_active and key == self._keymap.get("open_pr"):
-                pr = self._table.get_selected_pr()
-                if pr:
-                    webbrowser.open(pr.html_url)
-                    with contextlib.suppress(Exception):
-                        event.prevent_default()
-                    event.stop()
-                    return True
-            if key == self._keymap.get("next_page"):
-                self.action_next_page()
-                with contextlib.suppress(Exception):
-                    event.prevent_default()
-                event.stop()
-                return True
-            if key == self._keymap.get("prev_page"):
-                self.action_prev_page()
-                with contextlib.suppress(Exception):
-                    event.prevent_default()
-                event.stop()
-                return True
-            if key == self._keymap.get("back"):
-                self.action_go_back()
-                with contextlib.suppress(Exception):
-                    event.prevent_default()
-                event.stop()
-                return True
-        except Exception:
-            pass
-        return False
-
-    def _handle_list_wrap_key(self, key: str, event) -> None:
-        """Wrap ListView selection for up/down keys at boundaries.
-
-        Args:
-            key: Key value from event.
-            event: The original Textual event.
-        """
-        if key not in {"up", "down"}:
-            return
-        target = None
-        if self._overlay_list is not None and self._overlay_list.display:
-            target = self._overlay_list
-        elif self._menu is not None and self._menu.display:
-            target = self._menu
-        if target is None:
-            return
-        try:
-            count = len(target.children)
-            if count == 0:
-                return
-            idx = getattr(target, "index", 0)
-            wrapped = self._maybe_wrap_index(count, idx, key)
-            if wrapped is None:
-                return
-            target.index = wrapped
-            with contextlib.suppress(Exception):
-                event.prevent_default()
-            event.stop()
-        except Exception:
-            pass
-
-    def _handle_prompt_one(self, container, label: str, cb: Callable[[str], None]) -> None:
-        """Process a one-field prompt OK/Cancel action.
-
-        Args:
-            container: The prompt container Vertical node.
-            label: Button label (OK/Cancel).
-            cb: Callback to invoke with the entered value.
-        """
-        self._prompt_manager.handle_prompt_one(container, label, cb)
-
-    def _handle_prompt_two(self, container, label: str, cb: Callable[[str, str], None]) -> None:
-        """Process a two-field prompt OK/Cancel action.
-
-        Args:
-            container: The prompt container Vertical node.
-            label: Button label (OK/Cancel).
-            cb: Callback to invoke with the two entered values.
-        """
-        self._prompt_manager.handle_prompt_two(container, label, cb)
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle OK/Cancel button presses for prompt overlays."""
+        self._event_handler.on_button_pressed(event)
