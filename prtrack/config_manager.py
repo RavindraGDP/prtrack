@@ -43,7 +43,7 @@ class ConfigManager:
             ("set_page_size", "Set PRs per page"),
             ("set_settings_page_size", "Set Settings menu page size"),
             ("update_token", "Update GitHub token"),
-            ("keymap_menu", "Key bindings"),
+            ("keymap_menu", "Set Key bindings"),
             ("show_keymap", "Show current key bindings"),
             ("show_config", "Show current config"),
         ]
@@ -118,36 +118,48 @@ class ConfigManager:
             ("prev_page", f"prev_page → '{self.app._keymap.get('prev_page', '')}'"),
             ("open_pr", f"open_pr → '{self.app._keymap.get('open_pr', '')}'"),
             ("mark_markdown", f"mark_markdown → '{self.app._keymap.get('mark_markdown', '')}'"),
-            ("back_key", f"back → '{self.app._keymap.get('back', '')}'"),
+            ("key_back", f"back → '{self.app._keymap.get('back', '')}'"),
             ("reset_all", "Reset all to defaults"),
             ("back", "Back"),
         ]
-        self.app._show_choice_menu("Key bindings", items)
+        self.app._show_choice_menu("Set Key bindings", items)
         self.app._overlay_select_action = lambda key: self._handle_keymap_action(key)
+        # Add to navigation stack so back button works correctly
+        if not self.app._navigation_stack or self.app._navigation_stack[-1] != "config_menu":
+            self.app._navigation_stack.append("config_menu")
 
     def _handle_keymap_action(self, action: str) -> None:
+        # Handle navigation actions first
+        if action == "back":
+            self.app.action_go_back()
+            return
         if action == "reset_all":
             self.app.cfg.keymap = {}
             save_config(self.app.cfg)
             self.app._keymap = {**self.app._keymap_defaults}
             self._show_keymap_menu()
             return
+        if action == "key_back":
+            # Handle the back key binding action
+            current = self.app._keymap.get("back", "")
+            self.app._prompt_manager.prompt_one_field(
+                "Set key for back (empty to reset)\nPress the key you want to use, then Enter/OK",
+                current,
+                lambda v: self._do_set_keymap("back", v),
+            )
+            return
         if action in self.app._keymap_defaults:
             current = self.app._keymap.get(action, "")
             self.app._prompt_manager.prompt_one_field(
-                f"Set key for {action} (empty to reset)",
+                f"Set key for {action} (empty to reset)\nPress the key you want to use, then Enter/OK",
                 current,
                 lambda v, a=action: self._do_set_keymap(a, v),
             )
             return
         # Only add to navigation stack if it's not already there
-        if action == "back":
-            self.app.action_go_back()
-        else:
-            # Only add to navigation stack if it's not already there
-            if not self.app._navigation_stack or self.app._navigation_stack[-1] != "config_menu":
-                self.app._navigation_stack.append("config_menu")
-            self.show_config_menu()
+        if not self.app._navigation_stack or self.app._navigation_stack[-1] != "config_menu":
+            self.app._navigation_stack.append("config_menu")
+        self.show_config_menu()
 
     def _do_set_keymap(self, action: str, value: str) -> None:
         key = value.strip().lower()
