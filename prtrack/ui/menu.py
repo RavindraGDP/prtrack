@@ -22,7 +22,7 @@ class MenuManager:
         self.app._status.display = False
         self.app._menu.focus()
         # Clear navigation stack when going back to main menu
-        self.app._navigation_stack.clear()
+        self.app._navigation_manager.clear_stack()
 
     def show_list(self, title: str, items: list[str], select_action=None) -> None:
         """Display a list overlay for selecting an item.

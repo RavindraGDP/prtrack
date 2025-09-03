@@ -30,8 +30,8 @@ class ConfigManager:
         # Push to navigation stack if coming from main menu
         if is_from_main_menu:
             # Clear the navigation stack when coming from main menu to avoid accumulation
-            self.app._navigation_stack.clear()
-            self.app._navigation_stack.append("main_menu")
+            self.app._navigation_manager.clear_stack()
+            self.app._navigation_manager.push_screen("main_menu")
             self.app._settings_page_index = 0
 
         actions = [
@@ -109,8 +109,8 @@ class ConfigManager:
         lines.append("(Press Back or select any item to close)")
         self.app._show_list("Help / Key bindings", lines, select_action=lambda _val: self.app.action_go_back())
         # Add to navigation stack so back button works correctly
-        if not self.app._navigation_stack or self.app._navigation_stack[-1] != "config_menu":
-            self.app._navigation_stack.append("config_menu")
+        if self.app._navigation_manager.peek_screen() != "config_menu":
+            self.app._navigation_manager.push_screen("config_menu")
 
     def _show_keymap_menu(self) -> None:
         items = [
@@ -125,8 +125,8 @@ class ConfigManager:
         self.app._show_choice_menu("Set Key bindings", items)
         self.app._overlay_select_action = lambda key: self._handle_keymap_action(key)
         # Add to navigation stack so back button works correctly
-        if not self.app._navigation_stack or self.app._navigation_stack[-1] != "config_menu":
-            self.app._navigation_stack.append("config_menu")
+        if self.app._navigation_manager.peek_screen() != "config_menu":
+            self.app._navigation_manager.push_screen("config_menu")
 
     def _handle_keymap_action(self, action: str) -> None:
         # Handle navigation actions first
@@ -157,8 +157,8 @@ class ConfigManager:
             )
             return
         # Only add to navigation stack if it's not already there
-        if not self.app._navigation_stack or self.app._navigation_stack[-1] != "config_menu":
-            self.app._navigation_stack.append("config_menu")
+        if self.app._navigation_manager.peek_screen() != "config_menu":
+            self.app._navigation_manager.push_screen("config_menu")
         self.show_config_menu()
 
     def _do_set_keymap(self, action: str, value: str) -> None:
@@ -185,7 +185,7 @@ class ConfigManager:
     def _prompt_add_repo(self) -> None:
         """Prompt the user to add a repository and optional users."""
         # Push current screen to navigation stack
-        self.app._navigation_stack.append("config_menu")
+        self.app._navigation_manager.push_screen("config_menu")
         self.app._prompt_manager.prompt_two_fields(
             "Add Repo", "owner/repo", "optional users (comma)", self._do_add_repo
         )
@@ -203,19 +203,16 @@ class ConfigManager:
             self.app.cfg.repositories.append(self.app.RepoConfig(name=repo, users=users or None))
             save_config(self.app.cfg)
         # Go back to the previous screen using navigation stack
-        if self.app._navigation_stack:
-            prev_screen = self.app._navigation_stack.pop()
-            if prev_screen == "config_menu":
-                self.show_config_menu()
-            else:
-                self.app._show_menu()
+        prev_screen = self.app._navigation_manager.pop_screen()
+        if prev_screen == "config_menu":
+            self.show_config_menu()
         else:
             self.app._show_menu()
 
     def _prompt_remove_repo(self) -> None:
         """Prompt for selecting a repository to remove from the config."""
         # Push current screen to navigation stack
-        self.app._navigation_stack.append("config_menu")
+        self.app._navigation_manager.push_screen("config_menu")
         names = [r.name for r in self.app.cfg.repositories]
         self.app._show_list("Remove Repo - select", names, select_action=self._do_remove_repo)
 
@@ -231,19 +228,16 @@ class ConfigManager:
             self.app.storage.delete_prs_by_repo(repo_name)
         save_config(self.app.cfg)
         # Go back to the previous screen using navigation stack
-        if self.app._navigation_stack:
-            prev_screen = self.app._navigation_stack.pop()
-            if prev_screen == "config_menu":
-                self.show_config_menu()
-            else:
-                self.app._show_menu()
+        prev_screen = self.app._navigation_manager.pop_screen()
+        if prev_screen == "config_menu":
+            self.show_config_menu()
         else:
             self.app._show_menu()
 
     def _prompt_add_account(self) -> None:
         """Prompt to add an account globally or scoped to a repository."""
         # Push current screen to navigation stack
-        self.app._navigation_stack.append("config_menu")
+        self.app._navigation_manager.push_screen("config_menu")
         self.app._prompt_manager.prompt_two_fields(
             "Add Account", "username", "repo (owner/repo or empty=global)", self._do_add_account
         )
@@ -277,7 +271,7 @@ class ConfigManager:
     def _prompt_remove_account_select(self) -> None:
         """Show a list of accounts (global and per-repo) to remove via selection."""
         # Push current screen to navigation stack
-        self.app._navigation_stack.append("config_menu")
+        self.app._navigation_manager.push_screen("config_menu")
         items: list[str] = []
         # Global users
         for u in sorted(set(self.app.cfg.global_users)):
@@ -325,7 +319,7 @@ class ConfigManager:
     def _prompt_update_token(self) -> None:
         """Prompt to update the stored GitHub personal access token."""
         # Push current screen to navigation stack
-        self.app._navigation_stack.append("config_menu")
+        self.app._navigation_manager.push_screen("config_menu")
         self.app._prompt_manager.prompt_one_field("Update GitHub Token", "token", self._do_update_token)
 
     def _do_update_token(self, token: str) -> None:
@@ -339,18 +333,12 @@ class ConfigManager:
         # refresh client headers
         self.app.client = self.app.GitHubClient(self.app.cfg.auth_token)
         # Go back to the previous screen using navigation stack
-        if self.app._navigation_stack:
-            prev_screen = self.app._navigation_stack.pop()
-            if prev_screen == "config_menu":
-                self.show_config_menu()
-            elif self.app._navigation_stack:
-                prev_screen = self.app._navigation_stack.pop()
-                if prev_screen == "config_menu":
-                    self.show_config_menu()
-                else:
-                    self.app._show_menu()
-            else:
-                self.app._show_menu()
+        prev_screen = self.app._navigation_manager.pop_screen()
+        if prev_screen == "config_menu":
+            self.show_config_menu()
+        elif self.app._navigation_manager.peek_screen() == "config_menu":
+            self.app._navigation_manager.pop_screen()
+            self.show_config_menu()
         else:
             self.app._show_menu()
 
@@ -370,15 +358,15 @@ class ConfigManager:
         lines.append("(Press Back or select any item to close)")
         self.app._show_list("Current Config", lines, select_action=lambda _val: self.app.action_go_back())
         # Add to navigation stack so back button works correctly
-        if not self.app._navigation_stack or self.app._navigation_stack[-1] != "config_menu":
-            self.app._navigation_stack.append("config_menu")
+        if self.app._navigation_manager.peek_screen() != "config_menu":
+            self.app._navigation_manager.push_screen("config_menu")
 
     # ---------- Prompt helpers ----------
 
     def _prompt_set_staleness_threshold(self) -> None:
         """Prompt for staleness threshold in seconds."""
         # Push current screen to navigation stack
-        self.app._navigation_stack.append("config_menu")
+        self.app._navigation_manager.push_screen("config_menu")
         self.app._prompt_manager.prompt_one_field(
             "Set staleness threshold (seconds)",
             str(self.app.cfg.staleness_threshold_seconds),
@@ -392,19 +380,16 @@ class ConfigManager:
             self.app._stale_after_seconds = seconds
             save_config(self.app.cfg)
         # Go back to the previous screen using navigation stack
-        if self.app._navigation_stack:
-            prev_screen = self.app._navigation_stack.pop()
-            if prev_screen == "config_menu":
-                self.show_config_menu()
-            else:
-                self.app._show_menu()
+        prev_screen = self.app._navigation_manager.pop_screen()
+        if prev_screen == "config_menu":
+            self.show_config_menu()
         else:
             self.app._show_menu()
 
     def _prompt_set_pr_page_size(self) -> None:
         """Prompt for PRs per page size."""
         # Push current screen to navigation stack
-        self.app._navigation_stack.append("config_menu")
+        self.app._navigation_manager.push_screen("config_menu")
         self.app._prompt_manager.prompt_one_field(
             "Set PRs per page",
             str(getattr(self.app.cfg, "pr_page_size", 10)),
@@ -424,7 +409,7 @@ class ConfigManager:
     def _prompt_set_settings_menu_page_size(self) -> None:
         """Prompt for Settings menu page size."""
         # Push current screen to navigation stack
-        self.app._navigation_stack.append("config_menu")
+        self.app._navigation_manager.push_screen("config_menu")
         self.app._prompt_manager.prompt_one_field(
             "Set Settings menu page size",
             str(getattr(self.app.cfg, "menu_page_size", 5)),
@@ -442,6 +427,6 @@ class ConfigManager:
         except Exception as e:
             self.app._show_toast(f"Invalid number (> 0): {e}")
         # Only add to navigation stack if it's not already there
-        if not self.app._navigation_stack or self.app._navigation_stack[-1] != "config_menu":
-            self.app._navigation_stack.append("config_menu")
+        if self.app._navigation_manager.peek_screen() != "config_menu":
+            self.app._navigation_manager.push_screen("config_menu")
         self.show_config_menu()

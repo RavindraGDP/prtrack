@@ -697,7 +697,7 @@ class PRTrackApp(App):
         match action:
             case "md_by_repo":
                 # Push current screen to navigation stack before showing repo list
-                self._navigation_stack.append("markdown_menu")
+                self._navigation_manager.push_screen("markdown_menu")
                 self._show_list(
                     "Repos",
                     [r.name for r in self.cfg.repositories],
@@ -705,7 +705,7 @@ class PRTrackApp(App):
                 )
             case "md_by_account":
                 # Push current screen to navigation stack before showing account list
-                self._navigation_stack.append("markdown_menu")
+                self._navigation_manager.push_screen("markdown_menu")
                 accounts = sorted(
                     set(self.cfg.global_users) | {u for r in self.cfg.repositories for u in (r.users or [])}
                 )
@@ -733,13 +733,13 @@ class PRTrackApp(App):
 
     def _md_select_repo(self, repo_name: str) -> None:
         # Push the repo selection screen to navigation stack so backspace works correctly
-        self._navigation_stack.append("repo_selection")
+        self._navigation_manager.push_screen("repo_selection")
         self._show_cached_repo(repo_name)
         self._enter_md_mode("repo", repo_name)
 
     def _md_select_account(self, account: str) -> None:
         # Push the account selection screen to navigation stack so backspace works correctly
-        self._navigation_stack.append("account_selection")
+        self._navigation_manager.push_screen("account_selection")
         self._show_cached_account(account)
         self._enter_md_mode("account", account)
 
@@ -766,7 +766,7 @@ class PRTrackApp(App):
             self._show_markdown_menu()
             return
         # Push current screen to navigation stack before showing review list
-        self._navigation_stack.append("markdown_menu")
+        self._navigation_manager.push_screen("markdown_menu")
         # Selecting an item will deselect it
         self._show_list("Review Selection - select to remove", items, select_action=self._md_deselect)
 
@@ -789,7 +789,7 @@ class PRTrackApp(App):
             self._show_markdown_menu()
             return
         # Push current screen to navigation stack before showing prompt
-        self._navigation_stack.append("markdown_menu")
+        self._navigation_manager.push_screen("markdown_menu")
         default_path = os.path.join(os.getcwd(), "pr-track.md")
         # Reuse one-field prompt
         self._prompt_manager.prompt_one_field(
@@ -811,9 +811,9 @@ class PRTrackApp(App):
         self._md_mode = False
         self._md_scope = None
         # Check if we should return to markdown menu
-        if self._navigation_stack and self._navigation_stack[-1] == "markdown_menu":
+        if self._navigation_manager.peek_screen() == "markdown_menu":
             # Remove the markdown_menu entry from stack and show markdown menu
-            self._navigation_stack.pop()
+            self._navigation_manager.pop_screen()
             self._show_markdown_menu()
         else:
             self._show_menu()
