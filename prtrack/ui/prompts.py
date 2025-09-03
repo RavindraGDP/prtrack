@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Input, Label
+
+if TYPE_CHECKING:  # For type checking only, not used at runtime
+    from ..tui import PRTrackApp
 
 
 class PromptManager:
     """Manages prompt display and interaction for the PRTrack TUI."""
 
-    def __init__(self, app) -> None:
+    def __init__(self, app: PRTrackApp) -> None:
         """Initialize with reference to the main app."""
         self.app = app
 
@@ -52,7 +56,7 @@ class PromptManager:
         container.data_cb = cb  # type: ignore[attr-defined]
         self.app.mount(container)
 
-    def handle_prompt_one(self, container, label: str, cb: Callable[[str], None]) -> None:
+    def handle_prompt_one(self, container: Vertical, label: str, cb: Callable[[str], None]) -> None:
         """Process a one-field prompt OK/Cancel action.
 
         Args:
@@ -65,9 +69,9 @@ class PromptManager:
         if label == "OK":
             cb(value)
         else:
-            self.app._navigate_back_or_home()
+            self.app._navigation_manager.navigate_back_or_home()
 
-    def handle_prompt_two(self, container, label: str, cb: Callable[[str, str], None]) -> None:
+    def handle_prompt_two(self, container: Vertical, label: str, cb: Callable[[str, str], None]) -> None:
         """Process a two-field prompt OK/Cancel action.
 
         Args:
@@ -81,4 +85,4 @@ class PromptManager:
         if label == "OK":
             cb(v1, v2)
         else:
-            self.app._navigate_back_or_home()
+            self.app._navigation_manager.navigate_back_or_home()

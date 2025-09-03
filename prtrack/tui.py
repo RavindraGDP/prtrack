@@ -26,6 +26,7 @@ from textual.widgets import (
 from . import storage
 from .config import AppConfig, RepoConfig, load_config, save_config
 from .github import GITHUB_API, GitHubClient, PullRequest, filter_prs
+from .navigation import NavigationManager
 from .ui import MenuManager, OverlayManager, PromptManager, PRTable, StatusManager
 from .utils.markdown import write_prs_markdown
 
@@ -124,6 +125,7 @@ class PRTrackApp(App):
         self._overlay_manager = OverlayManager(self)
         self._prompt_manager = PromptManager(self)
         self._status_manager = StatusManager(self)
+        self._navigation_manager = NavigationManager(self)
 
     def compose(self) -> ComposeResult:
         """Compose the main layout containing header, menu, status, table, and footer."""
@@ -159,9 +161,9 @@ class PRTrackApp(App):
         self._remove_all_prompts()
         if self._close_overlay_if_open():
             return
-        if self._handle_markdown_back_if_needed():
+        if self._navigation_manager.handle_markdown_back_if_needed():
             return
-        self._navigate_back_or_home()
+        self._navigation_manager.navigate_back_or_home()
 
     def action_accept_markdown_selection(self) -> None:
         """In markdown selection mode, return to the markdown menu."""
@@ -1036,7 +1038,7 @@ class PRTrackApp(App):
         username = username.strip()
         repo_name = repo_name.strip()
         if not username:
-            self._navigate_back_or_home()
+            self._navigation_manager.navigate_back_or_home()
             return
         if repo_name:
             for r in self.cfg.repositories:
@@ -1050,7 +1052,7 @@ class PRTrackApp(App):
             users.add(username)
             self.cfg.global_users = sorted(users)
         save_config(self.cfg)
-        self._navigate_back_or_home()
+        self._navigation_manager.navigate_back_or_home()
 
     def _prompt_remove_account_select(self) -> None:
         """Show a list of accounts (global and per-repo) to remove via selection."""
@@ -1083,7 +1085,7 @@ class PRTrackApp(App):
         try:
             prefix, username = key.split(":", 1)
         except ValueError:
-            self._navigate_back_or_home()
+            self._navigation_manager.navigate_back_or_home()
             return
         username = username.strip()
         if prefix == "global":
@@ -1098,7 +1100,7 @@ class PRTrackApp(App):
             with contextlib.suppress(Exception):
                 storage.delete_prs_by_account(username, repo_name)
         save_config(self.cfg)
-        self._navigate_back_or_home()
+        self._navigation_manager.navigate_back_or_home()
 
     def _prompt_update_token(self) -> None:
         """Prompt to update the stored GitHub personal access token."""
@@ -1289,45 +1291,6 @@ class PRTrackApp(App):
             True if an overlay was closed and navigation occurred; False otherwise.
         """
         return self._overlay_manager.close_overlay_if_open()
-
-    def _handle_markdown_back_if_needed(self) -> bool:
-        """Handle back navigation when in markdown selection context.
-
-        Returns:
-            True if markdown-specific back handling occurred; False otherwise.
-        """
-        if not (self._md_mode and self._table.display):
-            return False
-        if self._navigation_stack and self._navigation_stack[-1] == "repo_selection":
-            self._navigation_stack.pop()
-            self._show_list(
-                "Repos",
-                [r.name for r in self.cfg.repositories],
-                select_action=self._md_select_repo,
-            )
-            return True
-        if self._navigation_stack and self._navigation_stack[-1] == "account_selection":
-            self._navigation_stack.pop()
-            accounts = sorted(set(self.cfg.global_users) | {u for r in self.cfg.repositories for u in (r.users or [])})
-            self._show_list("Accounts", accounts, select_action=self._md_select_account)
-            return True
-        self._show_markdown_menu()
-        return True
-
-    def _navigate_back_or_home(self) -> None:
-        """Navigate back using the stack or go home when stack is empty."""
-        if self._navigation_stack:
-            prev_screen = self._navigation_stack.pop()
-            if prev_screen == "config_menu":
-                self._show_config_menu()
-            elif prev_screen == "main_menu":
-                self._show_menu()
-            elif prev_screen == "markdown_menu":
-                self._show_markdown_menu()
-            else:
-                self._show_menu()
-        else:
-            self._show_menu()
 
     def _handle_overlay_selection_if_any(self, event: ListView.Selected) -> bool:
         """Handle overlay list selection if the event targets an overlay list.

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import contextlib
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # For type checking only, not used at runtime
+    from ..tui import PRTrackApp
 
 
 class OverlayManager:
     """Manages overlay display and interaction for the PRTrack TUI."""
 
-    def __init__(self, app) -> None:
+    def __init__(self, app: PRTrackApp) -> None:
         """Initialize with reference to the main app."""
         self.app = app
 
@@ -25,7 +29,7 @@ class OverlayManager:
         self.app._overlay_select_action = None
         self.app._md_mode = False
         self.app._md_scope = None
-        self.app._navigate_back_or_home()
+        self.app._navigation_manager.navigate_back_or_home()
         return True
 
     def remove_all_prompts(self) -> None:
