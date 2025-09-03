@@ -20,11 +20,11 @@ from textual.widgets import (
     Label,
     ListItem,
     ListView,
-    Static,
 )
 
 from . import storage
-from .config import AppConfig, RepoConfig, load_config, save_config
+from .config import AppConfig, RepoConfig, load_config
+from .config_manager import ConfigManager
 from .github import GITHUB_API, GitHubClient, PullRequest, filter_prs
 from .navigation import NavigationManager
 from .ui import MenuManager, OverlayManager, PromptManager, PRTable, StatusManager
@@ -126,6 +126,7 @@ class PRTrackApp(App):
         self._prompt_manager = PromptManager(self)
         self._status_manager = StatusManager(self)
         self._navigation_manager = NavigationManager(self)
+        self._config_manager = ConfigManager(self)
 
     def compose(self) -> ComposeResult:
         """Compose the main layout containing header, menu, status, table, and footer."""
@@ -667,44 +668,7 @@ class PRTrackApp(App):
 
     def _show_config_menu(self, is_from_main_menu: bool = False) -> None:
         """Display Settings menu as an overlay list."""
-        # Push to navigation stack if coming from main menu
-        if is_from_main_menu:
-            # Clear the navigation stack when coming from main menu to avoid accumulation
-            self._navigation_stack.clear()
-            self._navigation_stack.append("main_menu")
-            self._settings_page_index = 0
-
-        actions = [
-            ("add_repo", "Add repo"),
-            ("remove_repo", "Remove repo"),
-            ("add_account", "Add account"),
-            ("remove_account", "Remove account"),
-            ("set_stale", "Set staleness threshold (seconds)"),
-            ("set_page_size", "Set PRs per page"),
-            ("set_settings_page_size", "Set Settings menu page size"),
-            ("update_token", "Update GitHub token"),
-            ("keymap_menu", "Key bindings"),
-            ("show_keymap", "Show current key bindings"),
-            ("show_config", "Show current config"),
-        ]
-        # Paginate actions
-        page_size = max(1, int(getattr(self.cfg, "menu_page_size", 5)))
-        total = len(actions)
-        pages = max(1, (total + page_size - 1) // page_size)
-        index = max(0, min(self._settings_page_index, pages - 1))
-        start = index * page_size
-        end = min(start + page_size, total)
-        page_actions = actions[start:end]
-        # Navigation controls
-        if pages > 1:
-            if index > 0:
-                page_actions.append(("settings_prev", "Previous"))
-            if index < pages - 1:
-                page_actions.append(("settings_next", "Next"))
-        # Always include Back at the end
-        page_actions.append(("back", "Back"))
-        title = f"Settings (Page {index+1}/{pages})" if pages > 1 else "Settings"
-        self._show_choice_menu(title, page_actions)
+        self._config_manager.show_config_menu(is_from_main_menu)
 
     def _show_choice_menu(self, title: str, actions: list[tuple[str, str]]) -> None:
         """Show a simple menu of labeled actions.
@@ -801,6 +765,8 @@ class PRTrackApp(App):
             self._show_toast("No PRs selected")
             self._show_markdown_menu()
             return
+        # Push current screen to navigation stack before showing review list
+        self._navigation_stack.append("markdown_menu")
         # Selecting an item will deselect it
         self._show_list("Review Selection - select to remove", items, select_action=self._md_deselect)
 
@@ -822,9 +788,13 @@ class PRTrackApp(App):
             self._show_toast("No PRs selected")
             self._show_markdown_menu()
             return
+        # Push current screen to navigation stack before showing prompt
+        self._navigation_stack.append("markdown_menu")
         default_path = os.path.join(os.getcwd(), "pr-track.md")
         # Reuse one-field prompt
-        self._prompt_one_field("Output markdown path (empty = CWD/pr-track.md)", default_path, self._do_save_markdown)
+        self._prompt_manager.prompt_one_field(
+            "Output markdown path (empty = CWD/pr-track.md)", default_path, self._do_save_markdown
+        )
 
     def _do_save_markdown(self, path: str) -> None:
         outfile = path.strip() or os.path.join(os.getcwd(), "pr-track.md")
@@ -854,29 +824,7 @@ class PRTrackApp(App):
         Args:
             action: Action key from the config menu.
         """
-        handlers: dict[str, Callable[[], None]] = {
-            "add_repo": self._prompt_add_repo,
-            "remove_repo": self._prompt_remove_repo,
-            "add_account": self._prompt_add_account,
-            "remove_account": self._prompt_remove_account_select,
-            "set_stale": self._prompt_set_staleness_threshold,
-            "set_page_size": self._prompt_set_pr_page_size,
-            "set_settings_page_size": self._prompt_set_settings_menu_page_size,
-            "update_token": self._prompt_update_token,
-            "keymap_menu": self._show_keymap_menu,
-            "show_keymap": self._show_current_keymap,
-            "show_config": self._show_current_config,
-            "settings_next": lambda: (
-                setattr(self, "_settings_page_index", self._settings_page_index + 1),
-                self._show_config_menu(),
-            ),
-            "settings_prev": lambda: (
-                setattr(self, "_settings_page_index", max(0, self._settings_page_index - 1)),
-                self._show_config_menu(),
-            ),
-            "back": self.action_go_back,
-        }
-        handlers.get(action, self._show_menu)()
+        self._config_manager.handle_config_action(action)
 
     def action_show_keymap_overlay(self) -> None:
         """Show an overlay with current key bindings; selecting any item closes it."""
@@ -887,374 +835,6 @@ class PRTrackApp(App):
             mark = " (default)" if ov is None else ""
             items.append(f"{k}: {self._keymap[k]}{mark}")
         self._show_list("Help / Key bindings", items, select_action=lambda _val: self.action_go_back())
-
-    # ---------- Keymap settings ----------
-
-    def _show_current_keymap(self) -> None:
-        lines = ["Current Key Bindings (overrides shown; defaults in code):"]
-        for k, v in self._keymap.items():
-            ov = self.cfg.keymap.get(k) if hasattr(self.cfg, "keymap") else None
-            mark = " (default)" if ov is None else ""
-            lines.append(f"{k}: {v}{mark}")
-        static = Static("\n".join(lines))
-        self.mount(static)
-
-        def close_and_back():
-            static.remove()
-            # Only add to navigation stack if it's not already there
-            if not self._navigation_stack or self._navigation_stack[-1] != "config_menu":
-                self._navigation_stack.append("config_menu")
-            self._show_config_menu()
-
-        self.set_timer(2.0, close_and_back)
-
-    def _show_keymap_menu(self) -> None:
-        items = [
-            ("next_page", f"next_page → '{self._keymap.get('next_page', '')}'"),
-            ("prev_page", f"prev_page → '{self._keymap.get('prev_page', '')}'"),
-            ("open_pr", f"open_pr → '{self._keymap.get('open_pr', '')}'"),
-            ("mark_markdown", f"mark_markdown → '{self._keymap.get('mark_markdown', '')}'"),
-            ("back_key", f"back → '{self._keymap.get('back', '')}'"),
-            ("reset_all", "Reset all to defaults"),
-            ("back", "Back"),
-        ]
-        self._show_choice_menu("Key bindings", items)
-        self._overlay_select_action = lambda key: self._handle_keymap_action(key)
-
-    def _handle_keymap_action(self, action: str) -> None:
-        if action == "reset_all":
-            self.cfg.keymap = {}
-            save_config(self.cfg)
-            self._keymap = {**self._keymap_defaults}
-            self._show_keymap_menu()
-            return
-        if action in self._keymap_defaults:
-            current = self._keymap.get(action, "")
-            self._prompt_one_field(
-                f"Set key for {action} (empty to reset)",
-                current,
-                lambda v, a=action: self._do_set_keymap(a, v),
-            )
-            return
-        # Only add to navigation stack if it's not already there
-        if action == "back":
-            self.action_go_back()
-        else:
-            # Only add to navigation stack if it's not already there
-            if not self._navigation_stack or self._navigation_stack[-1] != "config_menu":
-                self._navigation_stack.append("config_menu")
-            self._show_config_menu()
-
-    def _do_set_keymap(self, action: str, value: str) -> None:
-        key = value.strip().lower()
-        # Empty value resets to default by removing override
-        if not key:
-            with contextlib.suppress(Exception):
-                if action in self.cfg.keymap:
-                    del self.cfg.keymap[action]
-            self._keymap[action] = self._keymap_defaults.get(action, key)
-        else:
-            # Prevent duplicate bindings across actions to avoid conflicts
-            for act, mapped in list(self._keymap.items()):
-                if act != action and mapped == key:
-                    self._keymap[act] = self._keymap_defaults.get(act, mapped)
-                    with contextlib.suppress(Exception):
-                        if act in self.cfg.keymap:
-                            del self.cfg.keymap[act]
-            self.cfg.keymap[action] = key
-            self._keymap[action] = key
-        save_config(self.cfg)
-        self._show_keymap_menu()
-
-    def _prompt_add_repo(self) -> None:
-        """Prompt the user to add a repository and optional users."""
-        # Push current screen to navigation stack
-        self._navigation_stack.append("config_menu")
-        self._prompt_two_fields("Add Repo", "owner/repo", "optional users (comma)", self._do_add_repo)
-
-    def _do_add_repo(self, repo: str, users_csv: str) -> None:
-        """Add a repository to the config.
-
-        Args:
-            repo: Repository in "owner/repo" format.
-            users_csv: Optional comma-separated usernames to restrict tracking.
-        """
-        repo = repo.strip()
-        users = [u.strip() for u in users_csv.split(",") if u.strip()] if users_csv else []
-        if repo:
-            self.cfg.repositories.append(RepoConfig(name=repo, users=users or None))
-            save_config(self.cfg)
-        # Go back to the previous screen using navigation stack
-        if self._navigation_stack:
-            prev_screen = self._navigation_stack.pop()
-            if prev_screen == "config_menu":
-                self._show_config_menu()
-            else:
-                self._show_menu()
-        else:
-            self._show_menu()
-
-    def _prompt_remove_repo(self) -> None:
-        """Prompt for selecting a repository to remove from the config."""
-        # Push current screen to navigation stack
-        self._navigation_stack.append("config_menu")
-        names = [r.name for r in self.cfg.repositories]
-        self._show_list("Remove Repo - select", names, select_action=self._do_remove_repo)
-
-    def _do_remove_repo(self, repo_name: str) -> None:
-        """Remove a repository from the configuration.
-
-        Args:
-            repo_name: Repository in "owner/repo" format to remove.
-        """
-        self.cfg.repositories = [r for r in self.cfg.repositories if r.name != repo_name]
-        # Purge cached PRs for this repo immediately
-        with contextlib.suppress(Exception):
-            storage.delete_prs_by_repo(repo_name)
-        save_config(self.cfg)
-        # Go back to the previous screen using navigation stack
-        if self._navigation_stack:
-            prev_screen = self._navigation_stack.pop()
-            if prev_screen == "config_menu":
-                self._show_config_menu()
-            else:
-                self._show_menu()
-        else:
-            self._show_menu()
-
-    def _prompt_add_account(self) -> None:
-        """Prompt to add an account globally or scoped to a repository."""
-        # Push current screen to navigation stack
-        self._navigation_stack.append("config_menu")
-        self._prompt_two_fields("Add Account", "username", "repo (owner/repo or empty=global)", self._do_add_account)
-
-    def _do_add_account(self, username: str, repo_name: str) -> None:
-        """Add an account to global or per-repo tracked users.
-
-        Args:
-            username: GitHub username to add.
-            repo_name: "owner/repo" to scope the username, or empty for global.
-        """
-        username = username.strip()
-        repo_name = repo_name.strip()
-        if not username:
-            self._navigation_manager.navigate_back_or_home()
-            return
-        if repo_name:
-            for r in self.cfg.repositories:
-                if r.name == repo_name:
-                    users = set(r.users or [])
-                    users.add(username)
-                    r.users = sorted(users)
-                    break
-        else:
-            users = set(self.cfg.global_users)
-            users.add(username)
-            self.cfg.global_users = sorted(users)
-        save_config(self.cfg)
-        self._navigation_manager.navigate_back_or_home()
-
-    def _prompt_remove_account_select(self) -> None:
-        """Show a list of accounts (global and per-repo) to remove via selection."""
-        # Push current screen to navigation stack
-        self._navigation_stack.append("config_menu")
-        items: list[str] = []
-        # Global users
-        for u in sorted(set(self.cfg.global_users)):
-            items.append(f"global:{u}")
-        # Per-repo users
-        for r in self.cfg.repositories:
-            for u in sorted(set(r.users or [])):
-                items.append(f"{r.name}:{u}")
-        if not items:
-            self._show_menu()
-            return
-        self._show_list(
-            "Remove Account - select",
-            items,
-            select_action=self._do_remove_account_select,
-        )
-
-    def _do_remove_account_select(self, key: str) -> None:
-        """Handle selection of an account removal entry.
-
-        Key format:
-          - "global:username" for global users
-          - "owner/repo:username" for repo-scoped users
-        """
-        try:
-            prefix, username = key.split(":", 1)
-        except ValueError:
-            self._navigation_manager.navigate_back_or_home()
-            return
-        username = username.strip()
-        if prefix == "global":
-            self.cfg.global_users = [u for u in self.cfg.global_users if u != username]
-            with contextlib.suppress(Exception):
-                storage.delete_prs_by_account(username)
-        else:
-            repo_name = prefix
-            for r in self.cfg.repositories:
-                if r.name == repo_name and r.users:
-                    r.users = [u for u in r.users if u != username] or None
-            with contextlib.suppress(Exception):
-                storage.delete_prs_by_account(username, repo_name)
-        save_config(self.cfg)
-        self._navigation_manager.navigate_back_or_home()
-
-    def _prompt_update_token(self) -> None:
-        """Prompt to update the stored GitHub personal access token."""
-        # Push current screen to navigation stack
-        self._navigation_stack.append("config_menu")
-        self._prompt_one_field("Update GitHub Token", "token", self._do_update_token)
-
-    def _do_update_token(self, token: str) -> None:
-        """Store a new GitHub token and refresh the client.
-
-        Args:
-            token: The new token value; empty string clears the token.
-        """
-        self.cfg.auth_token = token.strip() or None
-        save_config(self.cfg)
-        # refresh client headers
-        self.client = GitHubClient(self.cfg.auth_token)
-        # Go back to the previous screen using navigation stack
-        if self._navigation_stack:
-            prev_screen = self._navigation_stack.pop()
-            if prev_screen == "config_menu":
-                self._show_config_menu()
-            elif self._navigation_stack:
-                prev_screen = self._navigation_stack.pop()
-                if prev_screen == "config_menu":
-                    self._show_config_menu()
-                else:
-                    self._show_menu()
-            else:
-                self._show_menu()
-        else:
-            self._show_menu()
-
-    def _show_current_config(self) -> None:
-        """Display a transient view of the current configuration."""
-        lines = ["Current Config:"]
-        lines.append(f"Token: {'set' if self.cfg.auth_token else 'not set'}")
-        users = ", ".join(self.cfg.global_users) if self.cfg.global_users else "(none)"
-        lines.append(f"Global users: {users}")
-        lines.append(f"Staleness threshold (s): {self.cfg.staleness_threshold_seconds}")
-        lines.append(f"PRs per page: {getattr(self.cfg, 'pr_page_size', 10)}")
-        for r in self.cfg.repositories:
-            users = ", ".join(r.users) if r.users else "(inherit globals)"
-            lines.append(f"Repo: {r.name} | users: {users}")
-        static = Static("\n".join(lines))
-        self.mount(static)
-
-        def close_and_back():
-            static.remove()
-            # Go back to the previous screen using navigation stack
-            if self._navigation_stack:
-                prev_screen = self._navigation_stack.pop()
-                if prev_screen == "config_menu":
-                    self._show_config_menu()
-                else:
-                    self._show_menu()
-            else:
-                self._show_menu()
-
-        self.set_timer(2.0, close_and_back)
-
-    # ---------- Prompt helpers ----------
-
-    def _prompt_one_field(self, title: str, placeholder: str, cb) -> None:
-        """Create a one-field input prompt overlay.
-
-        Args:
-            title: Title displayed above the input.
-            placeholder: Placeholder text for the input field.
-            cb: Callback invoked with the input string upon confirmation.
-        """
-        self._prompt_manager.prompt_one_field(title, placeholder, cb)
-
-    def _prompt_set_staleness_threshold(self) -> None:
-        """Prompt for staleness threshold in seconds."""
-        # Push current screen to navigation stack
-        self._navigation_stack.append("config_menu")
-        self._prompt_one_field(
-            "Set staleness threshold (seconds)",
-            str(self.cfg.staleness_threshold_seconds),
-            self._do_set_staleness_threshold,
-        )
-
-    def _do_set_staleness_threshold(self, value: str) -> None:
-        with contextlib.suppress(Exception):
-            seconds = max(0, int(value.strip()))
-            self.cfg.staleness_threshold_seconds = seconds
-            self._stale_after_seconds = seconds
-            save_config(self.cfg)
-        # Go back to the previous screen using navigation stack
-        if self._navigation_stack:
-            prev_screen = self._navigation_stack.pop()
-            if prev_screen == "config_menu":
-                self._show_config_menu()
-            else:
-                self._show_menu()
-        else:
-            self._show_menu()
-
-    def _prompt_set_pr_page_size(self) -> None:
-        """Prompt for PRs per page size."""
-        # Push current screen to navigation stack
-        self._navigation_stack.append("config_menu")
-        self._prompt_one_field(
-            "Set PRs per page",
-            str(getattr(self.cfg, "pr_page_size", 10)),
-            self._do_set_pr_page_size,
-        )
-
-    def _do_set_pr_page_size(self, value: str) -> None:
-        with contextlib.suppress(Exception):
-            size = int(value.strip())
-            if size <= 0:
-                raise ValueError("page size must be > 0")
-            self.cfg.pr_page_size = size  # type: ignore[attr-defined]
-            self._page_size = size
-            save_config(self.cfg)
-        self._show_menu()
-
-    def _prompt_set_settings_menu_page_size(self) -> None:
-        """Prompt for Settings menu page size."""
-        # Push current screen to navigation stack
-        self._navigation_stack.append("config_menu")
-        self._prompt_one_field(
-            "Set Settings menu page size",
-            str(getattr(self.cfg, "menu_page_size", 5)),
-            self._do_set_settings_menu_page_size,
-        )
-
-    def _do_set_settings_menu_page_size(self, value: str) -> None:
-        try:
-            size = int(value.strip())
-            if size <= 0:
-                raise ValueError
-            self.cfg.menu_page_size = size
-            save_config(self.cfg)
-            self._settings_page_index = 0
-        except Exception:
-            self._show_toast("Invalid number (> 0)")
-        # Only add to navigation stack if it's not already there
-        if not self._navigation_stack or self._navigation_stack[-1] != "config_menu":
-            self._navigation_stack.append("config_menu")
-        self._show_config_menu()
-
-    def _prompt_two_fields(self, title: str, ph1: str, ph2: str, cb) -> None:
-        """Create a two-field input prompt overlay.
-
-        Args:
-            title: Title displayed above the inputs.
-            ph1: Placeholder for the first input field.
-            ph2: Placeholder for the second input field.
-            cb: Callback invoked with both input strings upon confirmation.
-        """
-        self._prompt_manager.prompt_two_fields(title, ph1, ph2, cb)
 
     def _remove_all_prompts(self) -> None:
         """Remove all prompt overlays (one and two-field) if present."""
