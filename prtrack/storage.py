@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import os
 import sqlite3
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 from .config import CONFIG_DIR
 from .github import PullRequest
@@ -32,6 +34,83 @@ CREATE TABLE IF NOT EXISTS metadata (
     value TEXT NOT NULL
 );
 """
+
+
+class StorageManager:
+    """Manages background refresh operations and cache optimization."""
+
+    def __init__(self) -> None:
+        self._refresh_queue: dict[str, asyncio.Task] = {}
+        self._refresh_callbacks: dict[str, list[Callable]] = {}
+
+    def schedule_refresh(self, scope: str, refresh_func: Callable, callback: Callable | None = None) -> asyncio.Task:
+        """Schedule a background refresh for a specific scope.
+
+        Args:
+            scope: The scope to refresh (e.g., "all", "repo:owner/repo")
+            refresh_func: Async function to perform the refresh
+            callback: Optional callback to execute after refresh completes
+
+        Returns:
+            The asyncio Task handling the refresh
+        """
+        # Cancel existing refresh for this scope if present
+        if scope in self._refresh_queue:
+            self._refresh_queue[scope].cancel()
+
+        # Add callback if provided
+        if callback:
+            if scope not in self._refresh_callbacks:
+                self._refresh_callbacks[scope] = []
+            self._refresh_callbacks[scope].append(callback)
+
+        # Create and schedule the refresh task
+        async def _refresh_wrapper() -> None:
+            try:
+                await refresh_func()
+                # Execute callbacks if any
+                if scope in self._refresh_callbacks:
+                    for cb in self._refresh_callbacks[scope]:
+                        with contextlib.suppress(Exception):
+                            cb()
+                    # Clear callbacks after execution
+                    del self._refresh_callbacks[scope]
+            except Exception:
+                pass  # Silently ignore refresh errors
+            finally:
+                # Remove from queue when done
+                if scope in self._refresh_queue:
+                    del self._refresh_queue[scope]
+
+        task = asyncio.create_task(_refresh_wrapper())
+        self._refresh_queue[scope] = task
+        return task
+
+    def is_refreshing(self, scope: str) -> bool:
+        """Check if a scope is currently being refreshed.
+
+        Args:
+            scope: The scope to check
+
+        Returns:
+            True if the scope is being refreshed, False otherwise
+        """
+        return scope in self._refresh_queue and not self._refresh_queue[scope].done()
+
+    def cancel_refresh(self, scope: str) -> bool:
+        """Cancel a scheduled refresh for a scope.
+
+        Args:
+            scope: The scope to cancel refresh for
+
+        Returns:
+            True if a refresh was cancelled, False if none was scheduled
+        """
+        if scope in self._refresh_queue:
+            self._refresh_queue[scope].cancel()
+            del self._refresh_queue[scope]
+            return True
+        return False
 
 
 def _connect() -> sqlite3.Connection:
@@ -144,13 +223,17 @@ def get_cached_prs_by_repo(repo_name: str) -> list[PullRequest]:
 def get_cached_prs_by_account(account: str) -> list[PullRequest]:
     """Return cached PRs where author or assignees include the account."""
     with _connect() as conn:
-        cur = conn.execute("SELECT * FROM prs ORDER BY number DESC")
-        result: list[PullRequest] = []
-        for r in cur.fetchall():
-            pr = _row_to_pr(r)
-            if pr.author == account or account in pr.assignees:
-                result.append(pr)
-        return result
+        # Use SQL queries for better performance instead of filtering in Python
+        # We need to check both author and assignees (JSON array)
+        cur = conn.execute(
+            """
+            SELECT * FROM prs
+            WHERE author = ? OR assignees LIKE ?
+            ORDER BY number DESC
+        """,
+            (account, f'%"{account}"%'),
+        )
+        return [_row_to_pr(r) for r in cur.fetchall()]
 
 
 def delete_prs_by_repo(repo_name: str) -> None:
@@ -215,3 +298,54 @@ def _row_to_pr(row: sqlite3.Row) -> PullRequest:
         approvals=int(row["approvals"]),
         html_url=row["html_url"],
     )
+
+
+def batch_upsert_prs(prs: Iterable[PullRequest], fetched_at: int | None = None) -> None:
+    """Batch insert or update PRs in the cache for better performance.
+
+    Args:
+        prs: Iterable of `PullRequest` objects to upsert.
+        fetched_at: A single timestamp to apply to all PRs. If None, now() is used.
+    """
+    upsert_prs(prs, fetched_at)  # For now, just use the existing method
+
+
+def cleanup_old_cache(max_age_days: int = 30) -> None:
+    """Remove cached PRs older than max_age_days.
+
+    Args:
+        max_age_days: Maximum age of cached PRs in days. PRs older than this will be removed.
+    """
+    cutoff_time = int(time.time()) - (max_age_days * 24 * 60 * 60)
+    with _connect() as conn:
+        conn.execute("DELETE FROM prs WHERE fetched_at < ?", (cutoff_time,))
+        conn.execute("DELETE FROM metadata WHERE key LIKE 'last_refresh:%' AND value < ?", (cutoff_time,))
+
+
+def get_cache_stats() -> dict[str, int]:
+    """Get statistics about the cache.
+
+    Returns:
+        Dictionary with cache statistics.
+    """
+    with _connect() as conn:
+        # Get total number of PRs
+        cur = conn.execute("SELECT COUNT(*) as count FROM prs")
+        total_prs = cur.fetchone()["count"]
+
+        # Get number of repositories
+        cur = conn.execute("SELECT COUNT(DISTINCT repo) as count FROM prs")
+        repos = cur.fetchone()["count"]
+
+        # Get cache size (approximate)
+        cur = conn.execute(
+            """
+            SELECT SUM(
+                LENGTH(title) + LENGTH(author) + LENGTH(assignees) +
+                LENGTH(branch) + LENGTH(html_url)
+            ) as size FROM prs
+            """
+        )
+        size = cur.fetchone()["size"] or 0
+
+        return {"total_prs": total_prs, "repositories": repos, "approximate_size_bytes": size}

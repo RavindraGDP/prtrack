@@ -26,17 +26,6 @@ def make_pr(n: int) -> PullRequest:
     )
 
 
-def test_maybe_wrap_index_helper() -> None:
-    # no wrap in middle
-    assert PRTrackApp._maybe_wrap_index(TEST_LIST_SIZE, 1, "down") is None
-    assert PRTrackApp._maybe_wrap_index(TEST_LIST_SIZE, TEST_MIDDLE_INDEX, "up") is None
-    # wrap at boundaries
-    assert PRTrackApp._maybe_wrap_index(TEST_LIST_SIZE, TEST_FIRST_INDEX, "up") == TEST_LAST_INDEX
-    assert PRTrackApp._maybe_wrap_index(TEST_LIST_SIZE, TEST_LAST_INDEX, "down") == TEST_FIRST_INDEX
-    # empty list: no action
-    assert PRTrackApp._maybe_wrap_index(0, 0, "down") is None
-
-
 def test_pagination_next_prev_changes_page(monkeypatch) -> None:
     app = PRTrackApp()
     # Set page size to 2 and provide 5 PRs

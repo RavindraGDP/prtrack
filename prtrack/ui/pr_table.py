@@ -28,6 +28,8 @@ class PRTable(Static):
         self.title = title
         self.table = DataTable(cursor_type="row")
         self.prs: list[PullRequest] = []  # Store PRs for reference
+        self._visible_start = 0
+        self._visible_end = 0
 
     def compose(self):  # type: ignore[override]
         yield Label(self.title, id="table-title")
@@ -55,20 +57,29 @@ class PRTable(Static):
         """
         self.prs = list(prs)
         with contextlib.suppress(Exception):
-            # Replace table and add columns
-            self.table.remove()
-            self.table = DataTable(cursor_type="row")
-            self.mount(self.table)
-            self.table.add_columns(
-                "Repo",
-                "#",
-                "Title",
-                "Author",
-                "Assignees",
-                "Branch",
-                "Status",
-                "Approvals",
-            )
+            # Check if we need to recreate the table or just update rows
+            if not self.table.is_attached:
+                # Table not attached, need to recreate
+                self.table.remove()
+                self.table = DataTable(cursor_type="row")
+                self.mount(self.table)
+                self.table.add_columns(
+                    "Repo",
+                    "#",
+                    "Title",
+                    "Author",
+                    "Assignees",
+                    "Branch",
+                    "Status",
+                    "Approvals",
+                )
+            else:
+                # Update table with new data
+                pass
+
+            # Clear existing rows
+            self.table.clear()
+
             # Populate rows
             for i, pr in enumerate(self.prs):
                 self.table.add_row(

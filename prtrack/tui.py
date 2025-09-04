@@ -322,15 +322,12 @@ class PRTrackApp(App):
 
     def _render_current_page(self) -> None:
         """Render the current page from `_current_prs` into the table."""
-        total = len(self._current_prs)
-        if total == 0:
-            self._table.set_prs([])
-            return
-        pages = max(1, (total + self._page_size - 1) // self._page_size)
-        self._page = max(1, min(self._page, pages))
-        start = (self._page - 1) * self._page_size
-        end = start + self._page_size
-        self._table.set_prs(self._current_prs[start:end])
+        # Calculate start and end indices for the current page
+        start_idx = (self._page - 1) * self._page_size
+        end_idx = start_idx + self._page_size
+        # Get the PRs for the current page
+        page_prs = self._current_prs[start_idx:end_idx]
+        self._table.set_prs(page_prs)
         # Update status in markdown mode
         if self._md_mode:
             self._update_markdown_status()
@@ -536,12 +533,10 @@ class PRTrackApp(App):
         """Move to the next page of PRs."""
         if not self._current_prs:
             return
-        total = len(self._current_prs)
-        pages = max(1, (total + self._page_size - 1) // self._page_size)
-        if self._page < pages:
-            self._page += 1
-        else:
-            self._page = 1
+        # Calculate total number of pages
+        total_pages = max(1, (len(self._current_prs) + self._page_size - 1) // self._page_size)
+        # Move to next page, wrapping to first page if at the end
+        self._page = (self._page % total_pages) + 1
         self._render_current_page()
         scope = self._current_scope_key()
         self._update_status_label(scope, refreshing=False)
@@ -550,12 +545,10 @@ class PRTrackApp(App):
         """Move to the previous page of PRs."""
         if not self._current_prs:
             return
-        total = len(self._current_prs)
-        pages = max(1, (total + self._page_size - 1) // self._page_size)
-        if self._page > 1:
-            self._page -= 1
-        else:
-            self._page = pages
+        # Calculate total number of pages
+        total_pages = max(1, (len(self._current_prs) + self._page_size - 1) // self._page_size)
+        # Move to previous page, wrapping to last page if at the beginning
+        self._page = (self._page - 2 + total_pages) % total_pages + 1
         self._render_current_page()
         scope = self._current_scope_key()
         self._update_status_label(scope, refreshing=False)
