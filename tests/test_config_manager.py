@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 import prtrack.config_manager as cm
+from prtrack import config
 
 
 @dataclass
@@ -192,6 +193,36 @@ def test_add_remove_repo_and_accounts_and_token_flow():
     app._navigation_manager.clear_stack()
     mgr._do_update_token("")
     assert app.cfg.auth_token is None
+
+
+def test_do_add_repo_uses_repo_config_dataclass():
+    class DummyNav:
+        def pop_screen(self) -> str:
+            return "main_menu"
+
+        def peek_screen(self) -> None:
+            return None
+
+    class DummyApp:
+        def __init__(self) -> None:
+            self.cfg = config.AppConfig()
+            self._navigation_manager = DummyNav()
+            self._menu_calls = 0
+
+        def _show_menu(self) -> None:
+            self._menu_calls += 1
+
+    app = DummyApp()
+    mgr = cm.ConfigManager(app)  # type: ignore[arg-type]
+
+    mgr._do_add_repo("owner/repo", "")
+
+    assert len(app.cfg.repositories) == 1
+    repo_entry = app.cfg.repositories[0]
+    assert isinstance(repo_entry, config.RepoConfig)
+    assert repo_entry.name == "owner/repo"
+    assert repo_entry.users is None
+    assert app._menu_calls == 1
 
 
 def test_set_threshold_and_page_sizes_validation():

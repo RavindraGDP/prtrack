@@ -4,7 +4,7 @@ import contextlib
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from .config import save_config
+from .config import RepoConfig, save_config
 
 if TYPE_CHECKING:
     from .tui import PRTrackApp
@@ -200,7 +200,7 @@ class ConfigManager:
         repo = repo.strip()
         users = [u.strip() for u in users_csv.split(",") if u.strip()] if users_csv else []
         if repo:
-            self.app.cfg.repositories.append(self.app.RepoConfig(name=repo, users=users or None))
+            self.app.cfg.repositories.append(RepoConfig(name=repo, users=users or None))
             save_config(self.app.cfg)
         # Go back to the previous screen using navigation stack
         prev_screen = self.app._navigation_manager.pop_screen()
