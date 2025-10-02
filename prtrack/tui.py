@@ -439,24 +439,83 @@ class PRTrackApp(App):
         self._update_status_label(scope, refreshing=True)
 
         async def runner() -> None:
-            prs = await self._load_all_prs()
-            storage.upsert_prs(prs)
-            storage.record_last_refresh(scope)
-            # Re-aggregate to apply current filters and pagination
-            all_prs: list[PullRequest] = []
-            global_users = set(self.cfg.global_users)
-            for rc in self.cfg.repositories:
-                repo_prs = storage.get_cached_prs_by_repo(rc.name)
-                users = set(rc.users or []) or global_users
-                if users:
-                    repo_prs = filter_prs(repo_prs, users)
-                all_prs.extend(repo_prs)
-            all_prs.sort(key=lambda p: p.number, reverse=True)
-            self._current_prs = all_prs
-            self._render_current_page()
-            self._update_status_label(scope, refreshing=False)
+            try:
+                await self._refresh_all_repositories(scope)
+            except Exception:
+                # On error, don't update the cache, keep existing data
+                # Re-aggregate current cached data to ensure consistency
+                await self._refresh_error_handling()
+            finally:
+                self._update_status_label(scope, refreshing=False)
 
         self._refresh_task = asyncio.create_task(runner())
+
+    async def _refresh_all_repositories(self, scope: str) -> None:
+        """Refresh all repositories with concurrent requests."""
+        global_users = set(self.cfg.global_users)
+
+        # Prepare tasks per valid repo
+        tasks: list[tuple[RepoConfig, asyncio.Task[list[PullRequest]]]] = []
+        for rc in self.cfg.repositories:
+            try:
+                owner, repo = rc.name.split("/", 1)
+            except ValueError:
+                continue
+            task = asyncio.create_task(self.client.list_open_prs(owner, repo))
+            tasks.append((rc, task))
+
+        if not tasks:
+            # No valid repositories to refresh
+            # Re-aggregate current cached data
+            self._refresh_no_valid_repos(global_users)
+            return
+
+        # Await all repo requests concurrently
+        results = await asyncio.gather(*[t for _, t in tasks], return_exceptions=True)
+
+        # Process each repo's results individually using sync_repo_prs
+        for (rc, _), result in zip(tasks, results, strict=False):
+            if isinstance(result, Exception):
+                # Skip failed repos, keep their existing cache
+                continue
+            prs = result
+            users = set(rc.users or []) or global_users
+            if users:
+                prs = filter_prs(prs, users)
+            # Use sync_repo_prs to replace all PRs for this repo with new data
+            storage.sync_repo_prs(rc.name, prs)
+
+        storage.record_last_refresh(scope)
+
+        # Re-aggregate current cached data after all sync operations
+        all_prs: list[PullRequest] = self._reaggregate_cached_data(global_users)
+        self._current_prs = all_prs
+        self._render_current_page()
+
+    def _refresh_no_valid_repos(self, global_users: set[str]) -> None:
+        """Handle case where no valid repositories exist."""
+        all_prs: list[PullRequest] = self._reaggregate_cached_data(global_users)
+        self._current_prs = all_prs
+        self._render_current_page()
+
+    def _reaggregate_cached_data(self, global_users: set[str]) -> list[PullRequest]:
+        """Re-aggregate current cached data."""
+        all_prs: list[PullRequest] = []
+        for rc in self.cfg.repositories:
+            repo_prs = storage.get_cached_prs_by_repo(rc.name)
+            users = set(rc.users or []) or global_users
+            if users:
+                repo_prs = filter_prs(repo_prs, users)
+            all_prs.extend(repo_prs)
+        all_prs.sort(key=lambda p: p.number, reverse=True)
+        return all_prs
+
+    async def _refresh_error_handling(self) -> None:
+        """Handle errors during refresh by re-aggregating cached data."""
+        global_users = set(self.cfg.global_users)
+        all_prs: list[PullRequest] = self._reaggregate_cached_data(global_users)
+        self._current_prs = all_prs
+        self._render_current_page()
 
     def _schedule_refresh_repo(self, repo_name: str) -> None:
         """Schedule background refresh for a repository."""
@@ -465,12 +524,20 @@ class PRTrackApp(App):
         self._update_status_label(scope, refreshing=True)
 
         async def runner() -> None:
-            prs = await self._load_prs_by_repo(repo_name)
-            storage.upsert_prs(prs)
-            storage.record_last_refresh(scope)
-            self._current_prs = storage.get_cached_prs_by_repo(repo_name)
-            self._render_current_page()
-            self._update_status_label(scope, refreshing=False)
+            try:
+                prs = await self._load_prs_by_repo(repo_name)
+                # Use sync_repo_prs to replace all PRs for this repo with new data
+                storage.sync_repo_prs(repo_name, prs)
+                storage.record_last_refresh(scope)
+                self._current_prs = storage.get_cached_prs_by_repo(repo_name)
+                self._render_current_page()
+            except Exception:
+                # On error, don't update the cache, keep existing data
+                # Re-get cached data to ensure consistency
+                self._current_prs = storage.get_cached_prs_by_repo(repo_name)
+                self._render_current_page()
+            finally:
+                self._update_status_label(scope, refreshing=False)
 
         self._refresh_task = asyncio.create_task(runner())
 
@@ -481,12 +548,32 @@ class PRTrackApp(App):
         self._update_status_label(scope, refreshing=True)
 
         async def runner() -> None:
-            prs = await self._load_prs_by_account(account)
-            storage.upsert_prs(prs)
-            storage.record_last_refresh(scope)
-            self._current_prs = storage.get_cached_prs_by_account(account)
-            self._render_current_page()
-            self._update_status_label(scope, refreshing=False)
+            try:
+                # First, get all repositories that might have PRs for this account
+                # by using the existing load method which aggregates from all repos
+                prs = await self._load_prs_by_account(account)
+
+                # Group PRs by repository to sync each repo individually
+                repo_prs_map: dict[str, list[PullRequest]] = {}
+                for pr in prs:
+                    if pr.repo not in repo_prs_map:
+                        repo_prs_map[pr.repo] = []
+                    repo_prs_map[pr.repo].append(pr)
+
+                # Sync each repository that has PRs for this account
+                for repo_name, repo_prs in repo_prs_map.items():
+                    storage.sync_repo_prs(repo_name, repo_prs)
+
+                storage.record_last_refresh(scope)
+                self._current_prs = storage.get_cached_prs_by_account(account)
+                self._render_current_page()
+            except Exception:
+                # On error, don't update the cache, keep existing data
+                # Re-get cached data to ensure consistency
+                self._current_prs = storage.get_cached_prs_by_account(account)
+                self._render_current_page()
+            finally:
+                self._update_status_label(scope, refreshing=False)
 
         self._refresh_task = asyncio.create_task(runner())
 
@@ -509,13 +596,14 @@ class PRTrackApp(App):
                 # We need to create a new method to fetch a single PR
                 single_pr = await self._load_single_pr(owner, repo_name, pr.number)
                 if single_pr:
-                    # Update the PR in storage
+                    # Update the PR in storage using upsert_prs since it's just one PR
                     storage.upsert_prs([single_pr])
                     # Update the table with the refreshed PR
                     self._refresh_table_with_updated_pr(single_pr)
                     # Show toast notification
                     self._show_toast(f"PR {pr.repo}#{pr.number} refreshed")
             except Exception:
+                # On error, don't update the cache, keep existing data
                 pass  # Silently fail for now
             finally:
                 self._update_status_label(scope, refreshing=False)

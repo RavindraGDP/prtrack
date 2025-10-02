@@ -322,6 +322,42 @@ def cleanup_old_cache(max_age_days: int = 30) -> None:
         conn.execute("DELETE FROM metadata WHERE key LIKE 'last_refresh:%' AND value < ?", (cutoff_time,))
 
 
+def sync_repo_prs(repo: str, prs: Iterable[PullRequest], fetched_at: int | None = None) -> None:
+    """Replace cached PRs for `repo` with `prs` in a single transaction."""
+    ts = int(time.time()) if fetched_at is None else int(fetched_at)
+    rows = [
+        (
+            pr.repo,
+            pr.number,
+            pr.title,
+            pr.author,
+            json.dumps(pr.assignees),
+            pr.branch,
+            1 if pr.draft else 0,
+            pr.approvals,
+            pr.html_url,
+            ts,
+        )
+        for pr in prs
+    ]
+
+    with _connect() as conn:
+        # Delete existing PRs for this repo first (inside the same transaction)
+        conn.execute("DELETE FROM prs WHERE repo = ?", (repo,))
+        # Insert the new PRs
+        if rows:
+            conn.executemany(
+                """
+                INSERT INTO prs(
+                    repo, number, title, author, assignees,
+                    branch, draft, approvals, html_url, fetched_at
+                )
+                VALUES(?,?,?,?,?,?,?,?,?,?)
+                """,
+                rows,
+            )
+
+
 def get_cache_stats() -> dict[str, int]:
     """Get statistics about the cache.
 

@@ -93,6 +93,7 @@ rm -rf ~/.config/prtrack/
 - **PR details**: View comprehensive PR information including title, author, assignees, branch, and approval status
 - **Direct browser access**: Open PRs directly in your default web browser
 - **Individual PR refresh**: Refresh specific PRs without reloading all data
+- **Automatic cleanup**: Closed/merged PRs disappear automatically after the next refresh
 - **Local caching**: Stores PR data locally for faster access and offline viewing
 - **Intuitive TUI**: Clean, text-based interface with keyboard navigation
 - **Configuration management**: Easily add/remove repositories and configure settings through the UI
