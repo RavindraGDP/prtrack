@@ -111,8 +111,8 @@ async def test_github_rate_limit_sleep_and_retry(monkeypatch: pytest.MonkeyPatch
 
 def test_filter_prs() -> None:
     prs = [
-        gh.PullRequest("o/r", 1, "t", "alice", [], "b", False, 0, "u"),
-        gh.PullRequest("o/r", 2, "t", "bob", ["carol"], "b", False, 0, "u"),
+        gh.PullRequest("o/r", 1, "t", "alice", [], "b", False, 0, "u", "open"),
+        gh.PullRequest("o/r", 2, "t", "bob", ["carol"], "b", False, 0, "u", "open"),
     ]
     out = gh.filter_prs(prs, {"carol"})
     nums = {p.number for p in out}

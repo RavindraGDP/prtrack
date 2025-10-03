@@ -96,7 +96,7 @@ def test_keymap_and_wrap_behavior(monkeypatch):
     app = _app_with_lists()
     h = EventHandler(app)
     # table open key when not in md mode triggers browser open; stub webbrowser
-    pr = PullRequest("o/r", 1, "t", "alice", [], "b", False, 0, "http://u")
+    pr = PullRequest("o/r", 1, "t", "alice", [], "b", False, 0, "http://u", "open")
     app._table.get_selected_pr = lambda: pr
     opened = {}
     monkeypatch.setattr("webbrowser.open", lambda url: opened.setdefault("u", url))

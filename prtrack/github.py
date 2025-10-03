@@ -36,6 +36,7 @@ class PullRequest:
         draft: Whether the PR is marked as draft.
         approvals: Number of approval reviews on the PR.
         html_url: Web URL to the PR.
+        state: State of the PR ("open", "closed", "merged").
     """
 
     repo: str
@@ -47,6 +48,7 @@ class PullRequest:
     draft: bool
     approvals: int
     html_url: str
+    state: str = "open"  # Default to "open"
 
 
 class GitHubClient:
@@ -182,6 +184,7 @@ class GitHubClient:
                     draft=bool(pr.get("draft", False)),
                     approvals=0,  # filled below via concurrent review loads
                     html_url=pr["html_url"],
+                    state=pr.get("state", "open"),
                 )
             )
         # Fetch approvals for each PR concurrently
@@ -241,6 +244,7 @@ class GitHubClient:
                     draft=bool(pr.get("draft", False)),
                     approvals=0,  # filled below via concurrent review loads
                     html_url=pr["html_url"],
+                    state=pr.get("state", state),
                 )
             )
         # Fetch approvals for each PR concurrently

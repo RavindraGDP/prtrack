@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS prs (
     approvals INTEGER NOT NULL,
     html_url TEXT NOT NULL,
     fetched_at INTEGER NOT NULL, -- unix epoch seconds
+    state TEXT NOT NULL DEFAULT 'open', -- Added in v2 schema
     PRIMARY KEY (repo, number)
 );
 CREATE TABLE IF NOT EXISTS metadata (
@@ -123,6 +124,15 @@ def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+
+    # Check if 'state' column exists
+    cur = conn.execute("PRAGMA table_info(prs)")
+    columns = [row[1] for row in cur.fetchall()]  # row[1] is the column name
+
+    if "state" not in columns:
+        # Add the state column to existing databases
+        conn.execute("ALTER TABLE prs ADD COLUMN state TEXT NOT NULL DEFAULT 'open'")
+
     return conn
 
 
@@ -174,6 +184,7 @@ def upsert_prs(prs: Iterable[PullRequest], fetched_at: int | None = None) -> Non
             1 if pr.draft else 0,
             pr.approvals,
             pr.html_url,
+            pr.state,
             ts,
         )
         for pr in prs
@@ -185,9 +196,9 @@ def upsert_prs(prs: Iterable[PullRequest], fetched_at: int | None = None) -> Non
             """
             INSERT INTO prs(
                 repo, number, title, author, assignees,
-                branch, draft, approvals, html_url, fetched_at
+                branch, draft, approvals, html_url, state, fetched_at
             )
-            VALUES(?,?,?,?,?,?,?,?,?,?)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(repo, number) DO UPDATE SET
               title=excluded.title,
               author=excluded.author,
@@ -196,6 +207,7 @@ def upsert_prs(prs: Iterable[PullRequest], fetched_at: int | None = None) -> Non
               draft=excluded.draft,
               approvals=excluded.approvals,
               html_url=excluded.html_url,
+              state=excluded.state,
               fetched_at=excluded.fetched_at
             """,
             rows,
@@ -297,6 +309,7 @@ def _row_to_pr(row: sqlite3.Row) -> PullRequest:
         draft=bool(row["draft"]),
         approvals=int(row["approvals"]),
         html_url=row["html_url"],
+        state=row.get("state", "open"),  # Backward compatibility
     )
 
 
@@ -336,6 +349,7 @@ def sync_repo_prs(repo: str, prs: Iterable[PullRequest], fetched_at: int | None 
             1 if pr.draft else 0,
             pr.approvals,
             pr.html_url,
+            pr.state,
             ts,
         )
         for pr in prs
@@ -350,12 +364,27 @@ def sync_repo_prs(repo: str, prs: Iterable[PullRequest], fetched_at: int | None 
                 """
                 INSERT INTO prs(
                     repo, number, title, author, assignees,
-                    branch, draft, approvals, html_url, fetched_at
+                    branch, draft, approvals, html_url, state, fetched_at
                 )
-                VALUES(?,?,?,?,?,?,?,?,?,?)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 rows,
             )
+
+
+def delete_pr(repo: str, number: int) -> bool:
+    """Delete a specific PR from the cache.
+
+    Args:
+        repo: Repository name in "owner/repo" format.
+        number: PR number to delete.
+
+    Returns:
+        True if a PR was deleted, False if it didn't exist.
+    """
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM prs WHERE repo = ? AND number = ?", (repo, number))
+        return cur.rowcount > 0
 
 
 def get_cache_stats() -> dict[str, int]:

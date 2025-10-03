@@ -20,8 +20,8 @@ def test_app_config_from_to_dict_handles_missing_fields() -> None:
 def test_filter_prs_empty_users_returns_all() -> None:
     # Arrange
     prs = [
-        PullRequest("o/r", 1, "t1", "a", [], "b", False, 0, "http://example.com/1"),
-        PullRequest("o/r", 2, "t2", "c", ["d"], "b", False, 0, "http://example.com/2"),
+        PullRequest("o/r", 1, "t1", "a", [], "b", False, 0, "http://example.com/1", "open"),
+        PullRequest("o/r", 2, "t2", "c", ["d"], "b", False, 0, "http://example.com/2", "open"),
     ]
     expected_pr_count = 2
 

@@ -274,10 +274,17 @@ class PRTrackApp(App):
             pr_number: Pull request number.
 
         Returns:
-            A `PullRequest` object or None if not found.
+            A `PullRequest` object or None if not found or closed/merged.
         """
         try:
             data = await self.client._get(f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}")
+            # Check if the PR is closed or merged - if so, delete it from cache and return None
+            state = data.get("state", "open")
+            if state != "open":
+                # Delete the PR from cache since it's no longer open
+                storage.delete_pr(f"{owner}/{repo}", pr_number)
+                return None
+
             pr = PullRequest(
                 repo=f"{owner}/{repo}",
                 number=data["number"],
@@ -288,6 +295,7 @@ class PRTrackApp(App):
                 draft=bool(data.get("draft", False)),
                 approvals=0,  # Will be filled below
                 html_url=data["html_url"],
+                state=state,
             )
             # Fetch approvals
             approvals = await self.client._count_approvals(owner, repo, pr.number)
@@ -593,7 +601,6 @@ class PRTrackApp(App):
 
             # Load the specific PR
             try:
-                # We need to create a new method to fetch a single PR
                 single_pr = await self._load_single_pr(owner, repo_name, pr.number)
                 if single_pr:
                     # Update the PR in storage using upsert_prs since it's just one PR
@@ -602,6 +609,18 @@ class PRTrackApp(App):
                     self._refresh_table_with_updated_pr(single_pr)
                     # Show toast notification
                     self._show_toast(f"PR {pr.repo}#{pr.number} refreshed")
+                else:
+                    # PR was closed/merged and should be removed from the cache and UI
+                    # Update the table to reflect the removal
+                    kind, value = self._current_scope
+                    if kind == "all":
+                        self._show_cached_all()
+                    elif kind == "repo" and value:
+                        self._show_cached_repo(value)
+                    elif kind == "account" and value:
+                        self._show_cached_account(value)
+                    # Show toast notification about removal
+                    self._show_toast(f"PR {pr.repo}#{pr.number} closed/merged - removed from list")
             except Exception:
                 # On error, don't update the cache, keep existing data
                 pass  # Silently fail for now

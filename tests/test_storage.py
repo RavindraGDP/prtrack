@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,9 @@ def temp_storage_dir(monkeypatch):
         yield config_dir
 
 
-def make_pr(repo: str, number: int, author: str = "testuser", assignees: list[str] | None = None) -> PullRequest:
+def make_pr(
+    repo: str, number: int, author: str = "testuser", assignees: list[str] | None = None, state: str = "open"
+) -> PullRequest:
     """Create a test PullRequest object."""
     return PullRequest(
         repo=repo,
@@ -32,6 +35,7 @@ def make_pr(repo: str, number: int, author: str = "testuser", assignees: list[st
         draft=False,
         approvals=0,
         html_url=f"https://github.com/{repo}/pull/{number}",
+        state=state,
     )
 
 
@@ -401,9 +405,6 @@ def test_regression_closed_pr_removal_after_sync(temp_storage_dir):
     It shows what the behavior should be after the fix: when GitHub stops reporting
     a PR as open, the next refresh should remove it from the cache.
     """
-    # This import is needed for the test
-    import json
-    import time
 
     # Create a sync_repo_prs function as specified in the design doc
     def sync_repo_prs(repo: str, prs, fetched_at=None):
@@ -529,8 +530,6 @@ def test_sync_repo_prs_empty_list_removes_all(temp_storage_dir):
 
 def test_sync_repo_prs_with_fetched_at(temp_storage_dir):
     """Test that sync_repo_prs respects the fetched_at parameter."""
-    import time
-
     custom_timestamp = int(time.time()) - 1000  # 1000 seconds ago
 
     # Create PRs to sync with custom timestamp
