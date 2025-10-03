@@ -686,3 +686,44 @@ def test_sync_repo_prs_updates_existing_prs(temp_storage_dir):
     assert cached_prs[0].author == "updated_author"
     assert cached_prs[0].title == "Updated Title"
     assert cached_prs[0].assignees == ["updated_assignee"]
+
+
+def test_row_to_pr_backward_compatibility_state_missing(temp_storage_dir):
+    """Test that _row_to_pr handles rows without 'state' column (backward compatibility)."""
+
+    # Create a mock sqlite3.Row-like object without 'state' key
+    class MockRow:
+        def __init__(self, data):
+            self._data = data
+
+        def __getitem__(self, key):
+            return self._data[key]
+
+        def __contains__(self, key):
+            return key in self._data
+
+        def keys(self):
+            return self._data.keys()
+
+    # Create a row with all required fields except 'state'
+    mock_row = MockRow(
+        {
+            "repo": "owner/repo",
+            "number": 1,
+            "title": "Test PR",
+            "author": "testuser",
+            "assignees": "[]",
+            "branch": "main",
+            "draft": 0,
+            "approvals": 0,
+            "html_url": "https://github.com/owner/repo/pull/1",
+            # Note: 'state' is intentionally missing
+        }
+    )
+
+    # Call _row_to_pr and verify it defaults to 'open'
+    pr = storage._row_to_pr(mock_row)
+    assert pr.state == "open"
+    assert pr.repo == "owner/repo"
+    assert pr.number == 1
+    assert pr.title == "Test PR"

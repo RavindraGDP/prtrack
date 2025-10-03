@@ -309,7 +309,7 @@ def _row_to_pr(row: sqlite3.Row) -> PullRequest:
         draft=bool(row["draft"]),
         approvals=int(row["approvals"]),
         html_url=row["html_url"],
-        state=row.get("state", "open"),  # Backward compatibility
+        state=row["state"] if "state" in row else "open",  # Backward compatibility  # noqa: SIM401
     )
 
 
